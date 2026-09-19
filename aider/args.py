@@ -32,6 +32,118 @@ def default_env_file(git_root):
     return os.path.join(git_root, ".env") if git_root else ".env"
 
 
+PIPELINE_BUDGET_HELP = {
+    "architect_map_tokens": "repo map sent to the architect",
+    "ledger_view_tokens": "plan and task list sent to the architect",
+    "working_memory_tokens": "facts the architect is allowed to keep between steps",
+    "facts_tokens": "lookup results sent to the architect for one step",
+    "review_diff_tokens": "diff sent to the architect for review",
+    "lint_output_tokens": "lint output sent to the architect",
+    "test_output_tokens": "test output sent to the architect",
+    "source_slice_tokens": "source the architect can pull for one symbol",
+    "worker_snippet_tokens": "read-only snippets inlined into a worker brief",
+    "whole_file_max_tokens": "file size above which the worker switches to diffs",
+    "grep_hits": "search hits returned to the architect",
+    "max_tasks": "tasks allowed in one plan",
+    "max_attempts": "worker attempts per task before it is failed",
+    "max_test_rounds": "test fix rounds per task",
+    "max_need_rounds": "lookup rounds the architect may take per step",
+    "max_worker_calls": "worker calls in one run",
+}
+
+
+def add_pipeline_args(parser):
+    """Two-model pipeline mode: a planning architect and a small editing worker."""
+    from aider.pipeline.config import APPROVE_CHOICES, PipelineConfig
+
+    defaults = PipelineConfig()
+
+    group = parser.add_argument_group("Pipeline mode (two models)")
+    group.add_argument(
+        "--pipeline",
+        action="store_const",
+        dest="edit_format",
+        const="pipeline",
+        help=(
+            "Use pipeline edit format: the main model plans and reviews, a smaller worker"
+            " model edits one file at a time with a fresh context"
+        ),
+    )
+    group.add_argument(
+        "--pipeline-architect-model",
+        metavar="MODEL",
+        default=None,
+        help="Model that plans, briefs and reviews in pipeline mode (default: --model)",
+    )
+    group.add_argument(
+        "--pipeline-worker-model",
+        metavar="MODEL",
+        default=None,
+        help="Model that edits files in pipeline mode (default: --editor-model, then --model)",
+    )
+    group.add_argument(
+        "--pipeline-architect-api-base",
+        metavar="URL",
+        default=None,
+        help=(
+            "API base for the architect model, e.g. http://127.0.0.1:8081/v1 for a"
+            " llama-server on your first GPU"
+        ),
+    )
+    group.add_argument(
+        "--pipeline-worker-api-base",
+        metavar="URL",
+        default=None,
+        help=(
+            "API base for the worker model, e.g. http://127.0.0.1:8082/v1 for a"
+            " llama-server on your second GPU"
+        ),
+    )
+    group.add_argument(
+        "--pipeline-approve",
+        choices=APPROVE_CHOICES,
+        default=None,
+        help=(
+            "When to stop and ask you: plan (once, the default), task (every task),"
+            " never (fully automatic)"
+        ),
+    )
+    group.add_argument(
+        "--pipeline-tdd",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write tests before the code they cover (default: False)",
+    )
+    group.add_argument(
+        "--pipeline-prewarm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Load both models at startup so the first task does not wait for a cold"
+            " start (default: True)"
+        ),
+    )
+    group.add_argument(
+        "--pipeline-stream-worker",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Stream the worker's output as it edits (default: False)",
+    )
+
+    for name in PipelineConfig.budget_fields():
+        flag = "--pipeline-" + name.replace("_", "-")
+        group.add_argument(
+            flag,
+            type=int,
+            default=None,
+            metavar="TOKENS" if name.endswith("_tokens") else "N",
+            help=(
+                f"Limit on the {PIPELINE_BUDGET_HELP.get(name, name)}"
+                f" (default: {getattr(defaults, name)})"
+            ),
+        )
+
+
 def get_parser(default_config_files, git_root):
     parser = configargparse.ArgumentParser(
         description="aider is AI pair programming in your terminal",
@@ -209,6 +321,7 @@ def get_parser(default_config_files, git_root):
         default=True,
         help="Only work with models that have meta-data available (default: True)",
     )
+    add_pipeline_args(parser)
     group.add_argument(
         "--check-model-accepts-settings",
         action=argparse.BooleanOptionalAction,

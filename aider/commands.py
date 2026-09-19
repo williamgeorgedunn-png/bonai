@@ -28,6 +28,17 @@ from aider.utils import is_image_file
 from .dump import dump  # noqa: F401
 
 
+PIPELINE_SUBCOMMANDS = (
+    "status",
+    "resume",
+    "abort",
+    "skip",
+    "retry",
+    "digest",
+    "edit",
+)
+
+
 class SwitchCoder(Exception):
     def __init__(self, placeholder=None, **kwargs):
         self.kwargs = kwargs
@@ -1227,6 +1238,52 @@ class Commands:
     def cmd_context(self, args):
         """Enter context mode to see surrounding code context. If no prompt provided, switches to context mode."""  # noqa
         return self._generic_chat_command(args, "context", placeholder=args.strip() or None)
+
+    def completions_pipeline(self):
+        return sorted(PIPELINE_SUBCOMMANDS)
+
+    def cmd_pipeline(self, args):
+        """Run or inspect a two-model pipeline: status, resume, plan, skip, retry, abort, digest, edit"""  # noqa
+        args = (args or "").strip()
+        parts = args.split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub not in PIPELINE_SUBCOMMANDS:
+            # Anything else is a request to plan and execute.
+            if not args:
+                return self.cmd_chat_mode("pipeline")
+            return self._generic_chat_command(args, "pipeline")
+
+        coder = self.coder
+        if coder.edit_format != "pipeline":
+            self.io.tool_error(
+                f"/pipeline {sub} only works in pipeline mode. Run /pipeline (no arguments)"
+                " or start aider with --pipeline."
+            )
+            return
+
+        if sub == "status":
+            return coder.status()
+        if sub == "resume":
+            return coder.resume()
+        if sub == "abort":
+            return coder.abort()
+        if sub == "edit":
+            return coder.edit_ledger()
+        if sub == "digest":
+            paths = rest.split() if rest else [self.coder.get_rel_fname(f) for f in coder.abs_fnames]
+            if not paths:
+                self.io.tool_error("Name the files to digest, or /add them first.")
+                return
+            return coder.digest_paths(paths)
+        if not rest:
+            self.io.tool_error(f"Usage: /pipeline {sub} <task-id>")
+            return
+        if sub == "skip":
+            return coder.skip(rest)
+        if sub == "retry":
+            return coder.retry(rest)
 
     def cmd_ok(self, args):
         "Alias for `/code Ok, please go ahead and make those changes.` (any args are appended)"

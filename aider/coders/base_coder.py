@@ -37,6 +37,7 @@ from aider.io import ConfirmGroup, InputOutput
 from aider.linter import Linter
 from aider.llm import litellm
 from aider.models import RETRY_TIMEOUT
+from aider.pipeline.config import PipelineConfig
 from aider.reasoning_tags import (
     REASONING_TAG,
     format_reasoning_content,
@@ -363,6 +364,8 @@ class Coder:
         trace_tokens=None,
         focus_idents=None,
         snippets=None,
+        pipeline_config=None,
+        pipeline_worker_model=None,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -377,6 +380,11 @@ class Coder:
 
         self.auto_copy_context = auto_copy_context
         self.auto_accept_architect = auto_accept_architect
+
+        # Only PipelineCoder reads these, but every coder accepts them so that
+        # switching edit formats mid-chat keeps working.
+        self.pipeline_config = pipeline_config or PipelineConfig()
+        self.pipeline_worker_model = pipeline_worker_model
 
         self.ignore_mentions = ignore_mentions
         if not self.ignore_mentions:
