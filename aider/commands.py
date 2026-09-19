@@ -435,6 +435,18 @@ class Commands:
         else:
             self.coder.abs_read_only_fnames = set()
 
+    def _drop_snippets(self, word):
+        """Drop the snippets that came from a file the user just dropped."""
+
+        if not self.coder.snippets:
+            return
+
+        for rel_fname, symbol in list(self.coder.snippets):
+            abs_fname = self.coder.abs_root_path(rel_fname)
+            if word in rel_fname or word in abs_fname:
+                del self.coder.snippets[(rel_fname, symbol)]
+                self.io.tool_output(f"Removed snippet {rel_fname}: {symbol}")
+
     def _clear_chat_history(self):
         self.coder.done_messages = []
         self.coder.cur_messages = []
@@ -454,6 +466,10 @@ class Commands:
 
         # system messages
         main_sys = self.coder.fmt_system_prompt(self.coder.gpt_prompts.main_system)
+        if self.coder.tracer and self.coder.gpt_prompts.trace_instructions:
+            main_sys += "\n" + self.coder.fmt_system_prompt(
+                self.coder.gpt_prompts.trace_instructions
+            )
         main_sys += "\n" + self.coder.fmt_system_prompt(self.coder.gpt_prompts.system_reminder)
         msgs = [
             dict(role="system", content=main_sys),
@@ -485,6 +501,12 @@ class Commands:
         if snippets_content:
             tokens = self.coder.main_model.token_count(snippets_content)
             res.append((tokens, "code snippets", "use /unsnip to remove"))
+
+        # auto-traced snippets, which are rebuilt on every message
+        trace_msgs = self.coder.get_trace_messages()
+        if trace_msgs:
+            tokens = self.coder.main_model.token_count(trace_msgs)
+            res.append((tokens, "code traces", "use --no-auto-trace to disable"))
 
         fence = "`" * 3
 
@@ -935,6 +957,8 @@ class Commands:
         for word in filenames:
             # Expand tilde in the path
             expanded_word = os.path.expanduser(word)
+
+            self._drop_snippets(expanded_word)
 
             # Handle read-only files with substring matching and samefile check
             read_only_matched = []
@@ -1438,7 +1462,7 @@ class Commands:
             return []
 
         try:
-            index = self.coder.tracer.get_index(self.coder.get_all_abs_files())
+            index = self.coder.get_symbol_index()
         except Exception:
             return []
 
@@ -1474,10 +1498,16 @@ class Commands:
         if not self.io.confirm_ask(f"Add {k_tokens:.1f}k tokens of trace results to the chat?"):
             return
 
+        trace_text = self.coder.gpt_prompts.trace_results_prefix + result
+
         self.coder.cur_messages += [
-            dict(role="user", content=self.coder.gpt_prompts.trace_results_prefix + result),
+            dict(role="user", content=trace_text),
             dict(role="assistant", content=self.coder.gpt_prompts.trace_results_reply),
         ]
+
+        # These results haven't been sent yet, so they expire a message later
+        # than the ones the model asks for itself
+        self.coder.pending_trace_contents.add(trace_text)
 
     def completions_snip(self):
         return self._symbol_completions()
@@ -1504,7 +1534,7 @@ class Commands:
             return
 
         try:
-            index = self.coder.tracer.get_index(self.coder.get_all_abs_files())
+            index = self.coder.get_symbol_index()
             _name, _container, defs = self.coder.tracer.resolve(index, req)
         except Exception as err:
             self.io.tool_error(f"Unable to look up {req.symbol}: {err}")
@@ -1524,6 +1554,12 @@ class Commands:
         if not scope:
             self.io.tool_error(f"Can't work out the extent of {req.symbol}.")
             return
+
+        if scope.rel_fname in self.coder.get_chat_rel_fnames():
+            self.io.tool_warning(
+                f"{scope.rel_fname} is already in the chat in full, so the snippet won't be sent"
+                " until you /drop the file."
+            )
 
         self.coder.add_snippet(
             scope.rel_fname, index.qualified_name(scope), scope.start_line, scope.end_line
