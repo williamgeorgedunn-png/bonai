@@ -1451,6 +1451,9 @@ class Commands:
     def completions_trace(self):
         return self._symbol_completions()
 
+    def completions_tests(self):
+        return self._symbol_completions()
+
     def completions_focus(self):
         return self._symbol_completions()
 
@@ -1508,6 +1511,65 @@ class Commands:
         # These results haven't been sent yet, so they expire a message later
         # than the ones the model asks for itself
         self.coder.pending_trace_contents.add(trace_text)
+
+    def cmd_tests(self, args):
+        "Show the tests that exercise a symbol, and offer to add them as snippets"
+
+        if not self.coder.tracer:
+            self.io.tool_error("Test discovery needs a repo map, see --map-tokens.")
+            return
+
+        args = args.strip()
+        if not args:
+            self.io.tool_error("Please provide a symbol, eg: /tests handle_request")
+            return
+
+        req = parse_trace_line(args)
+        if not req:
+            self.io.tool_error(f"Can't read a symbol name out of: {args}")
+            return
+
+        if req.direction == "both":
+            req = req._replace(direction="tests")
+
+        result = self.coder.run_trace(req)
+        if not result:
+            self.io.tool_output(f"No tests found for {req.symbol}.")
+            return
+
+        self.io.tool_output(result)
+
+        hits = getattr(self.coder.tracer, "last_test_hits", None) or []
+        if not hits:
+            return
+
+        if not self.io.confirm_ask("Add those tests to the chat as read-only snippets?"):
+            return
+
+        try:
+            index = self.coder.get_symbol_index()
+        except Exception as err:
+            self.io.tool_error(f"Unable to look up the tests: {err}")
+            return
+
+        added = set()
+        for hit in hits:
+            scope = index.innermost_scope(hit.rel_fname, hit.line)
+            if not scope:
+                continue
+            symbol = index.qualified_name(scope)
+            key = (scope.rel_fname, symbol)
+            if key in added:
+                continue
+            added.add(key)
+            self.coder.add_snippet(scope.rel_fname, symbol, scope.start_line, scope.end_line)
+            self.io.tool_output(
+                f"Added {scope.rel_fname}:{scope.start_line + 1}-{scope.end_line + 1}"
+                f" (`{symbol}`) as a read-only snippet."
+            )
+
+        if not added:
+            self.io.tool_output("Could not work out the extent of those tests.")
 
     def completions_snip(self):
         return self._symbol_completions()
