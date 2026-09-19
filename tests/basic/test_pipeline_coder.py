@@ -869,6 +869,24 @@ class TestPipelineSetupFromArgs(unittest.TestCase):
         self.assertIsNone(config)
         io.tool_error.assert_called()
 
+    def test_named_worker_model_can_build_a_summarizer(self):
+        from aider.history import ChatSummary
+        from aider.main import setup_pipeline
+
+        args = self.parse(
+            [
+                "--pipeline",
+                "--pipeline-worker-model",
+                "openai/gpt-4o-mini",
+                "--no-show-model-warnings",
+            ]
+        )
+        _config, worker = setup_pipeline(args, Model("openai/gpt-4o"), InputOutput(yes=True))
+        self.assertIsNotNone(worker)
+        self.assertIsNotNone(worker.weak_model)
+        summarizer = ChatSummary([worker.weak_model, worker], worker.max_chat_history_tokens)
+        self.assertTrue(callable(summarizer.token_count))
+
 
 class TestPipelineOffByDefault(unittest.TestCase):
     def test_default_coder_is_unchanged(self):
@@ -907,6 +925,54 @@ class TestPipelineOffByDefault(unittest.TestCase):
                 main_model=Model("gpt-4o"), edit_format="pipeline", io=InputOutput(yes=True)
             )
             self.assertEqual(coder.worker_model.name, "gpt-4o")
+
+    def test_worker_coder_builds_when_the_model_has_no_weak_model(self):
+        """A worker without a separate weak model used to crash ChatSummary."""
+        with GitTemporaryDirectory() as root:
+            (Path(root) / "a.py").write_text("A = 1\n")
+            worker_model = Model("gpt-4o-mini")
+            worker_model.weak_model = None
+            coder = Coder.create(
+                main_model=Model("gpt-4o"),
+                edit_format="pipeline",
+                io=InputOutput(yes=True),
+                pipeline_worker_model=worker_model,
+                pipeline_config=PipelineConfig(prewarm=False),
+            )
+            worker = coder.workers.coder_for("pipeline-worker-whole")
+            self.assertIsNotNone(worker.summarizer)
+            self.assertTrue(callable(worker.summarizer.token_count))
+
+
+class TestPipelineChatMode(unittest.TestCase):
+    def test_pipeline_is_listed_among_chat_modes(self):
+        with GitTemporaryDirectory():
+            coder = Coder.create(
+                main_model=Model("gpt-4o"),
+                edit_format="pipeline",
+                io=InputOutput(yes=True),
+                pipeline_worker_model=Model("gpt-4o-mini"),
+                pipeline_config=PipelineConfig(prewarm=False),
+            )
+            outputs = []
+            coder.io.tool_output = lambda *a, **k: outputs.append(" ".join(str(x) for x in a))
+            coder.io.tool_error = lambda *a, **k: outputs.append(" ".join(str(x) for x in a))
+            coder.commands.cmd_chat_mode("not-a-mode")
+            text = "\n".join(outputs)
+            self.assertIn("pipeline", text)
+            self.assertIn("architect", text)
+
+    def test_bare_pipeline_command_switches_mode(self):
+        from aider.commands import SwitchCoder
+
+        with GitTemporaryDirectory():
+            coder = Coder.create(
+                main_model=Model("gpt-4o"),
+                io=InputOutput(yes=True),
+            )
+            with self.assertRaises(SwitchCoder) as ctx:
+                coder.commands.cmd_pipeline("")
+            self.assertEqual(ctx.exception.kwargs.get("edit_format"), "pipeline")
 
 
 if __name__ == "__main__":
