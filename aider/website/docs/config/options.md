@@ -38,7 +38,9 @@ usage: aider [-h] [--model] [--openai-api-key] [--anthropic-api-key]
              [--cache-prompts | --no-cache-prompts]
              [--cache-keepalive-pings] [--map-tokens]
              [--map-refresh] [--map-multiplier-no-files]
-             [--input-history-file] [--chat-history-file]
+             [--trace | --no-trace] [--auto-trace | --no-auto-trace]
+             [--trace-tokens] [--input-history-file]
+             [--chat-history-file]
              [--restore-chat-history | --no-restore-chat-history]
              [--llm-history-file] [--dark-mode] [--light-mode]
              [--pretty | --no-pretty] [--stream | --no-stream]
@@ -271,6 +273,26 @@ Environment variable: `AIDER_MAP_REFRESH`
 Multiplier for map tokens when no files are specified (default: 2)  
 Default: 2  
 Environment variable: `AIDER_MAP_MULTIPLIER_NO_FILES`  
+
+### `--trace`
+Enable /trace and let the LLM ask where symbols are defined and used (default: True)  
+Default: True  
+Environment variable: `AIDER_TRACE`  
+Aliases:
+  - `--trace`
+  - `--no-trace`
+
+### `--auto-trace`
+Automatically trace symbols mentioned in your message, without being asked (default: True)  
+Default: True  
+Environment variable: `AIDER_AUTO_TRACE`  
+Aliases:
+  - `--auto-trace`
+  - `--no-auto-trace`
+
+### `--trace-tokens VALUE`
+Suggested number of tokens to use for trace results (default: map tokens, min 1024)  
+Environment variable: `AIDER_TRACE_TOKENS`  
 
 ## History Files:
 

@@ -194,6 +194,15 @@ cog.outl("```")
 ## Multiplier for map tokens when no files are specified (default: 2)
 #map-multiplier-no-files: true
 
+## Enable /trace and let the LLM ask where symbols are defined and used (default: True)
+#trace: true
+
+## Automatically trace symbols mentioned in your message, without being asked (default: True)
+#auto-trace: true
+
+## Suggested number of tokens to use for trace results (default: map tokens, min 1024)
+#trace-tokens: xxx
+
 ################
 # History Files:
 

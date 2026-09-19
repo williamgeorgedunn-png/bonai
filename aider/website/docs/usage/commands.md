@@ -37,6 +37,7 @@ cog.out(get_help_md())
 | **/editor** | Open an editor to write a prompt |
 | **/editor-model** | Switch the Editor Model to a new LLM |
 | **/exit** | Exit the application |
+| **/focus** | Keep the repo map centered on these symbols, across turns |
 | **/git** | Run a git command (output excluded from chat) |
 | **/help** | Ask questions about aider |
 | **/lint** | Lint and fix in-chat files or all dirty files if none in chat |
@@ -57,10 +58,14 @@ cog.out(get_help_md())
 | **/run** | Run a shell command and optionally add the output to the chat (alias: !) |
 | **/save** | Save commands to a file that can reconstruct the current chat session's files |
 | **/settings** | Print out the current settings |
+| **/snip** | Add just one function/class to the chat as a read-only snippet, not the whole file |
 | **/test** | Run a shell command and add the output to the chat on non-zero exit code |
 | **/think-tokens** | Set the thinking token budget, eg: 8096, 8k, 10.5k, 0.5M, or 0 to disable. |
 | **/tokens** | Report on the number of tokens used by the current chat context |
+| **/trace** | Show where a symbol is defined, called, read and written |
 | **/undo** | Undo the last git commit if it was done by aider |
+| **/unfocus** | Stop focusing the repo map on symbols, or on the named ones |
+| **/unsnip** | Remove snippets from the chat, all of them or the named ones |
 | **/voice** | Record and transcribe voice input |
 | **/weak-model** | Switch the Weak Model to a new LLM |
 | **/web** | Scrape a webpage, convert to markdown and send in a message |

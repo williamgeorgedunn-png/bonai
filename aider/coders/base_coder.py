@@ -46,6 +46,7 @@ from aider.reasoning_tags import (
 from aider.repo import ANY_GIT_ERROR, GitRepo
 from aider.repomap import RepoMap
 from aider.run_cmd import run_cmd
+from aider.tracer import RepoTracer, TraceRequest, parse_trace_requests
 from aider.utils import format_content, format_messages, format_tokens, is_image_file
 from aider.waiting import WaitingSpinner
 
@@ -99,6 +100,18 @@ class Coder:
     last_keyboard_interrupt = None
     num_reflections = 0
     max_reflections = 3
+    tracer = None
+    auto_trace = True
+    trace_tokens = 1024
+    focus_idents = None
+    snippets = None
+    trace_contents = None
+    traced_this_turn = None
+    auto_trace_cache = None
+    num_trace_rounds = 0
+    # Tracing costs a round trip each time, so cap it separately from
+    # reflections: otherwise traces would starve file mentions and linting.
+    max_trace_rounds = 2
     edit_format = None
     yield_stream = False
     temperature = None
@@ -180,6 +193,8 @@ class Coder:
                 total_tokens_sent=from_coder.total_tokens_sent,
                 total_tokens_received=from_coder.total_tokens_received,
                 file_watcher=from_coder.file_watcher,
+                focus_idents=from_coder.focus_idents,
+                snippets=from_coder.snippets,
             )
             use_kwargs.update(update)  # override to complete the switch
             use_kwargs.update(kwargs)  # override passed kwargs
@@ -278,6 +293,10 @@ class Coder:
         else:
             lines.append("Repo-map: disabled")
 
+        if self.tracer:
+            auto = "auto" if self.auto_trace else "on request"
+            lines.append(f"Code tracing: {self.trace_tokens} tokens, {auto}")
+
         # Files
         for fname in self.get_inchat_relative_files():
             lines.append(f"Added {fname} to the chat.")
@@ -338,6 +357,11 @@ class Coder:
         file_watcher=None,
         auto_copy_context=False,
         auto_accept_architect=True,
+        trace=True,
+        auto_trace=True,
+        trace_tokens=None,
+        focus_idents=None,
+        snippets=None,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -356,6 +380,12 @@ class Coder:
         self.ignore_mentions = ignore_mentions
         if not self.ignore_mentions:
             self.ignore_mentions = set()
+
+        self.focus_idents = set(focus_idents) if focus_idents else set()
+        self.snippets = dict(snippets) if snippets else dict()
+        self.traced_this_turn = set()
+        self.trace_contents = set()
+        self.auto_trace_cache = None
 
         self.file_watcher = file_watcher
         if self.file_watcher:
@@ -507,6 +537,21 @@ class Coder:
                 refresh=map_refresh,
             )
 
+        self.auto_trace = auto_trace
+        if trace_tokens is None:
+            trace_tokens = max(map_tokens, 1024) if map_tokens else 1024
+        self.trace_tokens = trace_tokens
+
+        # Tracing needs the repo map's symbol index, so it rides along with it
+        if trace and self.repo_map:
+            self.tracer = RepoTracer(
+                self.repo_map,
+                io,
+                self.root,
+                max_tokens=self.trace_tokens,
+                verbose=self.verbose,
+            )
+
         self.summarizer = summarizer or ChatSummary(
             [self.main_model.weak_model, self.main_model],
             self.main_model.max_chat_history_tokens,
@@ -656,6 +701,31 @@ class Coder:
 
         return prompt
 
+    def add_snippet(self, rel_fname, symbol, start_line, end_line):
+        self.snippets[(rel_fname, symbol)] = (start_line, end_line)
+
+    def get_snippets_content(self):
+        """Just the named definitions, re-read every send so they stay current."""
+
+        prompt = ""
+        for (rel_fname, symbol), (start_line, end_line) in list(self.snippets.items()):
+            content = self.io.read_text(self.abs_root_path(rel_fname), silent=True)
+            if content is None:
+                self.io.tool_warning(f"Dropping snippet {rel_fname}:{symbol}, file is gone.")
+                del self.snippets[(rel_fname, symbol)]
+                continue
+
+            lines = content.splitlines()
+            body = "\n".join(lines[start_line : end_line + 1])
+
+            prompt += "\n"
+            prompt += f"{rel_fname} lines {start_line + 1}-{end_line + 1}, `{symbol}`:"
+            prompt += f"\n{self.fence[0]}\n"
+            prompt += body
+            prompt += f"\n{self.fence[1]}\n"
+
+        return prompt
+
     def get_read_only_files_content(self):
         prompt = ""
         for fname in self.abs_read_only_fnames:
@@ -674,6 +744,12 @@ class Coder:
         for msg in self.cur_messages:
             text += msg["content"] + "\n"
         return text
+
+    def get_last_user_message_text(self):
+        for msg in reversed(self.cur_messages):
+            if msg["role"] == "user" and isinstance(msg.get("content"), str):
+                return msg["content"]
+        return ""
 
     def get_ident_mentions(self, text):
         # Split the string on any character that is not alphanumeric
@@ -714,6 +790,9 @@ class Coder:
         mentioned_fnames = self.get_file_mentions(cur_msg_text)
         mentioned_idents = self.get_ident_mentions(cur_msg_text)
 
+        # /focus keeps the map centered on symbols across turns
+        mentioned_idents.update(self.focus_idents)
+
         mentioned_fnames.update(self.get_ident_filename_matches(mentioned_idents))
 
         all_abs_files = set(self.get_all_abs_files())
@@ -747,6 +826,181 @@ class Coder:
 
         return repo_content
 
+    def get_chat_rel_fnames(self):
+        return set(self.get_inchat_relative_files()) | set(
+            self.get_rel_fname(fname) for fname in self.abs_read_only_fnames
+        )
+
+    def run_trace(self, req, max_tokens=None):
+        """Run one trace, never letting a tracing problem break the chat."""
+
+        if not self.tracer:
+            return
+
+        try:
+            return self.tracer.trace(
+                req,
+                self.get_all_abs_files(),
+                chat_rel_fnames=self.get_chat_rel_fnames(),
+                max_tokens=max_tokens,
+            )
+        except Exception as err:
+            self.io.tool_warning(f"Unable to trace {req.symbol}: {err}")
+            if self.verbose:
+                self.io.tool_warning("".join(traceback.format_exception(type(err), err, None)))
+
+    def get_traceable_idents(self, text, limit=2):
+        """Symbols worth tracing without being asked, in a deterministic order.
+
+        Only names that are unambiguous in the repo and defined outside the
+        chat are worth spending tokens on: everything else the model can
+        already see, or can't act on.
+        """
+
+        if not self.tracer or not text:
+            return []
+
+        try:
+            index = self.tracer.get_index(self.get_all_abs_files())
+        except Exception as err:
+            self.io.tool_warning(f"Unable to index the repo for tracing: {err}")
+            return []
+
+        chat_rel_fnames = self.get_chat_rel_fnames()
+
+        candidates = []
+        for ident in self.get_ident_mentions(text):
+            if len(ident) < 5:
+                continue
+
+            defs = index.defs.get(ident)
+            if not defs or len(defs) > 2:
+                continue
+
+            if all(tag.rel_fname in chat_rel_fnames for tag in defs):
+                continue
+
+            rank = max(self.tracer.file_rank(tag.rel_fname) for tag in defs)
+            candidates.append((-rank, len(defs), ident))
+
+        return [ident for _rank, _num_defs, ident in sorted(candidates)[:limit]]
+
+    def get_auto_trace_text(self, text, limit=2):
+        """Trace symbols the message mentions, without the model asking."""
+
+        idents = self.get_traceable_idents(text, limit=limit)
+        if not idents:
+            return
+
+        budget = self.trace_tokens // max(len(idents), 1)
+
+        traces = []
+        for ident in idents:
+            req = TraceRequest(symbol=ident, direction="both", depth=1, file=None, strict=True)
+            result = self.run_trace(req, max_tokens=budget)
+            if result:
+                traces.append(result)
+
+        if not traces:
+            return
+
+        return self.gpt_prompts.trace_auto_prefix + "\n".join(traces)
+
+    def get_trace_messages(self):
+        """A transient chunk of traces for what the user just asked about.
+
+        Rebuilt on every send and never added to the chat history, exactly
+        like the repo map, so it can't accumulate in the context.
+        """
+
+        if not self.tracer or not self.auto_trace:
+            return []
+
+        text = self.get_last_user_message_text()
+        if not text:
+            return []
+
+        if self.auto_trace_cache and self.auto_trace_cache[0] == text:
+            return self.auto_trace_cache[1]
+
+        trace_text = self.get_auto_trace_text(text)
+        if trace_text:
+            messages = [
+                dict(role="user", content=trace_text),
+                dict(role="assistant", content=self.gpt_prompts.trace_results_reply),
+            ]
+        else:
+            messages = []
+
+        self.auto_trace_cache = (text, messages)
+
+        return messages
+
+    def get_trace_reply(self, content):
+        """Answer any trace requests in an LLM reply.
+
+        Returns text to reflect back to the model, or None. Unparseable,
+        unknown or repeated requests all produce something actionable rather
+        than silence, since a small model can't recover from silence.
+        """
+
+        if not self.tracer or not content:
+            return
+
+        requests = parse_trace_requests(content)
+        if not requests:
+            return
+
+        try:
+            index = self.tracer.get_index(self.get_all_abs_files())
+        except Exception as err:
+            self.io.tool_warning(f"Unable to index the repo for tracing: {err}")
+            return
+
+        # Prose like "let me trace through the logic" is not a request
+        requests = [
+            req
+            for req in requests
+            if req.strict or req.symbol.rpartition(".")[2] in index.defs
+        ]
+        if not requests:
+            return
+
+        if self.num_trace_rounds >= self.max_trace_rounds:
+            self.io.tool_warning("Ignoring trace request, already traced twice for this message.")
+            return self.gpt_prompts.trace_budget_exhausted
+
+        self.num_trace_rounds += 1
+
+        budget = self.trace_tokens // max(len(requests), 1)
+
+        results = []
+        for req in requests:
+            key = (req.symbol.lower(), req.direction, req.file)
+            if key in self.traced_this_turn:
+                results.append(
+                    f"\nI already traced `{req.symbol}` above, see those results."
+                    " Tell me which files you need added to the chat."
+                )
+                continue
+
+            self.traced_this_turn.add(key)
+            self.io.tool_output(f"Tracing {req.symbol}...")
+
+            result = self.run_trace(req, max_tokens=budget)
+            if result:
+                results.append(result)
+
+        if not results:
+            return
+
+        trace_text = self.gpt_prompts.trace_results_prefix + "\n".join(results)
+
+        # Remember it so it can be stubbed out of the chat history later
+        self.trace_contents.add(trace_text)
+
+        return trace_text
+
     def get_repo_messages(self):
         repo_messages = []
         repo_content = self.get_repo_map()
@@ -773,6 +1027,19 @@ class Coder:
                 dict(
                     role="assistant",
                     content="Ok, I will use these files as references.",
+                ),
+            ]
+
+        snippets_content = self.get_snippets_content()
+        if snippets_content:
+            readonly_messages += [
+                dict(
+                    role="user",
+                    content=self.gpt_prompts.snippets_prefix + snippets_content,
+                ),
+                dict(
+                    role="assistant",
+                    content=self.gpt_prompts.snippets_reply,
                 ),
             ]
 
@@ -869,6 +1136,10 @@ class Coder:
         self.test_outcome = None
         self.shell_commands = []
         self.message_cost = 0
+        self.num_trace_rounds = 0
+        self.traced_this_turn = set()
+        self.trace_contents = set()
+        self.auto_trace_cache = None
 
         if self.repo:
             self.commit_before_message.append(self.repo.get_head_commit_sha())
@@ -1033,8 +1304,34 @@ class Coder:
         self.summarizing_messages = None
         self.summarized_done_messages = []
 
+    def compact_trace_messages(self, messages):
+        """Replace trace results with a stub before they enter the history.
+
+        The snippets are only useful while the model is choosing files. Keeping
+        them would quietly grow the context of every later turn.
+        """
+
+        if not self.trace_contents:
+            return messages
+
+        compacted = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                for trace_text in self.trace_contents:
+                    if trace_text in content:
+                        content = content.replace(
+                            trace_text,
+                            "(I traced those symbols for you, results omitted here.)",
+                        )
+                if content != msg.get("content"):
+                    msg = dict(msg, content=content)
+            compacted.append(msg)
+
+        return compacted
+
     def move_back_cur_messages(self, message):
-        self.done_messages += self.cur_messages
+        self.done_messages += self.compact_trace_messages(self.cur_messages)
         self.summarize_start()
 
         # TODO check for impact on image messages
@@ -1258,6 +1555,9 @@ class Coder:
                     dict(role="assistant", content="Ok."),
                 ]
 
+        if self.tracer and self.gpt_prompts.trace_instructions:
+            main_sys += "\n" + self.fmt_system_prompt(self.gpt_prompts.trace_instructions)
+
         if self.gpt_prompts.system_reminder:
             main_sys += "\n" + self.fmt_system_prompt(self.gpt_prompts.system_reminder)
 
@@ -1281,6 +1581,7 @@ class Coder:
         chunks.repo = self.get_repo_messages()
         chunks.readonly_files = self.get_readonly_files_messages()
         chunks.chat_files = self.get_chat_files_messages()
+        chunks.trace = self.get_trace_messages()
 
         if self.gpt_prompts.system_reminder:
             reminder_message = [
@@ -1560,6 +1861,12 @@ class Coder:
         if not interrupted:
             add_rel_files_message = self.check_for_file_mentions(content)
             if add_rel_files_message:
+                # The model is already asking for context, so answer any trace
+                # request in the same reply instead of costing it another round
+                trace_message = self.get_trace_reply(content)
+                if trace_message:
+                    add_rel_files_message += "\n\n" + trace_message
+
                 if self.reflected_message:
                     self.reflected_message += "\n\n" + add_rel_files_message
                 else:
@@ -1594,6 +1901,13 @@ class Coder:
             self.move_back_cur_messages(saved_message)
 
         if self.reflected_message:
+            return
+
+        # Traces are answered after any edits are applied, so a reply that
+        # both edits and traces doesn't lose its edits
+        trace_message = self.get_trace_reply(content)
+        if trace_message:
+            self.reflected_message = trace_message
             return
 
         if edited and self.auto_lint:

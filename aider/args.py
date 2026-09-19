@@ -265,6 +265,30 @@ def get_parser(default_config_files, git_root):
         default=2,
         help="Multiplier for map tokens when no files are specified (default: 2)",
     )
+    group.add_argument(
+        "--trace",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable /trace and let the LLM ask where symbols are defined and used"
+            " (default: True)"
+        ),
+    )
+    group.add_argument(
+        "--auto-trace",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Automatically trace symbols mentioned in your message, without being asked"
+            " (default: True)"
+        ),
+    )
+    group.add_argument(
+        "--trace-tokens",
+        type=int,
+        default=None,
+        help="Suggested number of tokens to use for trace results (default: map tokens, min 1024)",
+    )
 
     ##########
     group = parser.add_argument_group("History Files")
