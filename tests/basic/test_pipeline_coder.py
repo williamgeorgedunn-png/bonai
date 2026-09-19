@@ -939,7 +939,8 @@ class TestPipelineOffByDefault(unittest.TestCase):
                 pipeline_worker_model=worker_model,
                 pipeline_config=PipelineConfig(prewarm=False),
             )
-            worker = coder.workers.coder_for("pipeline-worker-whole")
+            pool = WorkerPool(coder, worker_model, coder.config)
+            worker = pool.coder_for("pipeline-worker-whole")
             self.assertIsNotNone(worker.summarizer)
             self.assertTrue(callable(worker.summarizer.token_count))
 
