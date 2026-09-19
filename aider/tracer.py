@@ -1218,8 +1218,8 @@ class RepoTracer:
             return ""
 
         return (
-            "\nNone of these files are in the chat."
-            " Ask me to *add* only the ones you actually need to see or edit."
+            "\nAsk me to *add* only the files you actually need to see or edit."
+            " Don't ask for all of them."
         )
 
     def render_ambiguous_defs(self, index, req, name, defs):

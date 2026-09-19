@@ -200,7 +200,7 @@ cog.outl("```")
 ## Automatically trace symbols mentioned in your message, without being asked (default: True)
 #auto-trace: true
 
-## Suggested number of tokens to use for trace results (default: map tokens, min 1024)
+## Suggested number of tokens to use for trace results (default: 1024, or map tokens if smaller)
 #trace-tokens: xxx
 
 ################

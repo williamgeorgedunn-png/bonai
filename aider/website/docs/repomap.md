@@ -104,6 +104,39 @@ These are the key pieces of context that the LLM needs to know to understand
 the overall codebase.
 
 
+## Tracing code
+
+The repo map shows *definitions*. It doesn't show how they connect, so a model
+often can't tell where something is actually done, and ends up guessing which
+files to ask for.
+
+Tracing fills that gap. It searches the same tree-sitter data the repo map is
+built from and reports where a symbol is defined, called, read and written, as
+short snippets rather than whole files:
+
+- Aider traces symbols you mention, and symbols the LLM mentions, automatically.
+  The results are attached to the request being sent, and are thrown away
+  afterwards, so they never accumulate in the chat history.
+- The LLM can also ask for a trace itself, by replying with a fenced block
+  marked `trace` containing the names it wants. Aider answers with the results
+  and lets it try again, the same way it handles a request to add files.
+- You can run one yourself with `/trace some_function`, optionally with `up`
+  for just the callers or `down` for just what it uses.
+
+Tracing works for variables and attributes too, splitting the results into
+where the value is set and where it is read, and following it one hop through
+function calls and returns.
+
+Use `--trace-tokens` to size the results, `--no-auto-trace` to only trace when
+asked, and `--no-trace` to turn it off. Tracing needs the repo map, so it is
+off whenever the map is.
+
+Two related commands help keep the context small:
+
+- `/focus some_symbol` keeps the repo map centered on a symbol across turns.
+- `/snip some_function` adds just that function to the chat as a read-only
+  snippet, instead of its whole file.
+
 ## More info
 
 Please check the

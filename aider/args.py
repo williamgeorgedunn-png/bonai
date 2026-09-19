@@ -287,7 +287,10 @@ def get_parser(default_config_files, git_root):
         "--trace-tokens",
         type=int,
         default=None,
-        help="Suggested number of tokens to use for trace results (default: map tokens, min 1024)",
+        help=(
+            "Suggested number of tokens to use for trace results"
+            " (default: 1024, or map tokens if smaller)"
+        ),
     )
 
     ##########

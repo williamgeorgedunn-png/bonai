@@ -539,7 +539,8 @@ class Coder:
 
         self.auto_trace = auto_trace
         if trace_tokens is None:
-            trace_tokens = max(map_tokens, 1024) if map_tokens else 1024
+            # Traces are sent on top of the map, so keep them map-sized at most
+            trace_tokens = min(map_tokens, 1024) if map_tokens else 1024
         self.trace_tokens = trace_tokens
 
         # Tracing needs the repo map's symbol index, so it rides along with it
@@ -745,11 +746,32 @@ class Coder:
             text += msg["content"] + "\n"
         return text
 
-    def get_last_user_message_text(self):
-        for msg in reversed(self.cur_messages):
-            if msg["role"] == "user" and isinstance(msg.get("content"), str):
-                return msg["content"]
-        return ""
+    def get_trace_topic_text(self):
+        """What the conversation is currently about, for auto-tracing.
+
+        The latest request plus the model's latest reply, skipping trace
+        results themselves: tracing symbols out of trace output would just
+        feed on itself.
+        """
+
+        parts = []
+
+        for role in ("user", "assistant"):
+            for msg in reversed(self.cur_messages):
+                if msg["role"] != role:
+                    continue
+
+                content = msg.get("content")
+                if not isinstance(content, str):
+                    continue
+
+                if any(trace_text in content for trace_text in self.trace_contents or ()):
+                    continue
+
+                parts.append(content)
+                break
+
+        return "\n".join(parts)
 
     def get_ident_mentions(self, text):
         # Split the string on any character that is not alphanumeric
@@ -868,9 +890,14 @@ class Coder:
 
         chat_rel_fnames = self.get_chat_rel_fnames()
 
+        already_traced = {symbol for symbol, _direction, _file in self.traced_this_turn or ()}
+
         candidates = []
         for ident in self.get_ident_mentions(text):
             if len(ident) < 5:
+                continue
+
+            if ident.lower() in already_traced:
                 continue
 
             defs = index.defs.get(ident)
@@ -916,7 +943,7 @@ class Coder:
         if not self.tracer or not self.auto_trace:
             return []
 
-        text = self.get_last_user_message_text()
+        text = self.get_trace_topic_text()
         if not text:
             return []
 

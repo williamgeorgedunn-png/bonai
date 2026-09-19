@@ -188,6 +188,35 @@ class TestCoderTracing(unittest.TestCase):
             # It is a transient chunk, it must not be in the chat messages
             self.assertNotIn(chunks.trace[0], coder.cur_messages)
 
+    def test_auto_trace_follows_the_models_reply_too(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.cur_messages = [
+                dict(role="user", content="something is wrong with the lowercasing"),
+                dict(role="assistant", content="I think save_record is the culprit."),
+            ]
+            chunks = coder.format_chat_chunks()
+
+            self.assertTrue(chunks.trace)
+            self.assertIn("save_record", chunks.trace[0]["content"])
+
+    def test_auto_trace_ignores_its_own_results(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            trace_text = coder.get_trace_reply("```trace\nhandle_request\n```\n")
+            coder.cur_messages = [
+                dict(role="user", content="fix the lowercasing"),
+                dict(role="assistant", content="```trace\nhandle_request\n```"),
+                dict(role="user", content=trace_text),
+            ]
+
+            # Neither the trace output nor the symbol it already traced
+            self.assertEqual(coder.get_traceable_idents(coder.get_trace_topic_text()), [])
+
     def test_auto_trace_can_be_turned_off(self):
         with GitTemporaryDirectory():
             self.make_repo()

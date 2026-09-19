@@ -175,7 +175,7 @@ cog.outl("```")
 ## Automatically trace symbols mentioned in your message, without being asked (default: True)
 #AIDER_AUTO_TRACE=true
 
-## Suggested number of tokens to use for trace results (default: map tokens, min 1024)
+## Suggested number of tokens to use for trace results (default: 1024, or map tokens if smaller)
 #AIDER_TRACE_TOKENS=
 
 ################
