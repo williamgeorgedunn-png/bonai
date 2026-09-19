@@ -86,7 +86,9 @@ MAX_SCAN_BYTES = 1_000_000
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|spec)(/|$)|(^|/)(test_[^/]*|[^/]*_test|[^/]*\.test)\.")
 
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*(?P<info>[^\s`~]*)\s*(?P<rest>.*?)\s*$")
-LOOSE_TRACE_RE = re.compile(r"^\s*(?:[-*+]\s*)?/?trace\b[:\s]+(?P<body>.+?)\s*$", re.IGNORECASE)
+# Models often ask in prose instead of using the fence. These requests are
+# marked non-strict, so callers can require that they resolve to a real symbol.
+LOOSE_TRACE_RE = re.compile(r"\btrace\b[:\s]+(?P<body>.+?)\s*$", re.IGNORECASE)
 BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 DEPTH_RE = re.compile(r"^depth[=:]?(\d+)?$", re.IGNORECASE)
 
@@ -260,7 +262,7 @@ def parse_trace_requests(content, max_requests=MAX_SYMBOLS_PER_REQUEST):
             add(parse_trace_line(line))
             continue
 
-        loose = LOOSE_TRACE_RE.match(line)
+        loose = LOOSE_TRACE_RE.search(line)
         if loose:
             add(parse_trace_line(loose.group("body"), strict=False))
 
@@ -461,9 +463,10 @@ class RepoTracer:
 
         budget = max_tokens
 
-        # Where it is defined
+        # Where it is defined. Callers are the point of the trace, so the
+        # definitions never get more than a third of the budget.
         if def_scopes:
-            text = self.render_definitions(index, def_scopes)
+            text = self.render_definitions(index, def_scopes, budget * 0.35)
             budget -= self.token_count(text)
             sections.append(text)
 
@@ -478,7 +481,7 @@ class RepoTracer:
                 index,
                 hits,
                 total,
-                max(budget * (0.7 if req.direction == "both" else 1.0), 200),
+                max(budget, 0) * (0.7 if req.direction == "both" else 1.0),
                 title=f"Callers of `{name}`",
                 empty=f"No calls to `{name}` found outside its own definition.",
                 skipped_in_chat=skipped_in_chat,
@@ -632,6 +635,7 @@ class RepoTracer:
         reads = [hit for hit in hits if hit.kind not in ("write", "param")]
 
         shown_files = set()
+        max_tokens = max(max_tokens, 0)
 
         if req.direction in ("up", "both"):
             text, files = self.render_hits(
@@ -895,10 +899,15 @@ class RepoTracer:
     def value_source_note(self, index, assignment_node):
         """`x = foo(...)` -> note that the value comes from foo()."""
 
-        try:
-            value = assignment_node.child_by_field_name("value")
-        except Exception:
-            return ""
+        value = None
+        # python calls it "right", javascript calls it "value"
+        for field in ("value", "right"):
+            try:
+                value = assignment_node.child_by_field_name(field)
+            except Exception:
+                value = None
+            if value is not None:
+                break
 
         call_types = ("call", "call_expression", "await", "new_expression")
         if value is None or value.type not in call_types:
@@ -990,15 +999,24 @@ class RepoTracer:
 
         return f"\nTrace of `{symbol}` ({kind_label}, no definition found in the repo map):"
 
-    def render_definitions(self, index, def_scopes):
+    def render_definitions(self, index, def_scopes, budget):
         parts = []
+        used = 0
         for scope in def_scopes[:3]:
             abs_fname = index.abs_fnames.get(scope.rel_fname)
             if not abs_fname:
                 continue
             body = self.render_tree(abs_fname, scope.rel_fname, [scope.start_line])
-            if body:
-                parts.append(f"\n{scope.rel_fname}:\n{body}")
+            if not body:
+                continue
+
+            chunk = f"\n{scope.rel_fname}:\n{body}"
+            chunk_tokens = self.token_count(chunk)
+            if parts and used + chunk_tokens > budget:
+                break
+
+            used += chunk_tokens
+            parts.append(chunk)
 
         if not parts:
             return ""
