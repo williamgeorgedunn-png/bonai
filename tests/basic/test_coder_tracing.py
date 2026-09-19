@@ -131,6 +131,23 @@ class TestCoderTracing(unittest.TestCase):
             self.assertIn("results omitted", history)
             self.assertNotIn("Callers of", history)
 
+    def test_trace_results_expire_after_one_message(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            self.reply_with(coder, "```trace\nhandle_request\n```\n")
+            self.assertIn("Callers of", "\n".join(m["content"] for m in coder.cur_messages))
+
+            # No edits were made, so nothing moved to done_messages, but the
+            # next message must not still be paying for the snippets
+            self.reply_with(coder, "ok")
+            current = "\n".join(
+                m["content"] for m in coder.cur_messages if isinstance(m["content"], str)
+            )
+            self.assertNotIn("Callers of", current)
+            self.assertIn("results omitted", current)
+
     def test_trace_rounds_are_capped(self):
         with GitTemporaryDirectory():
             self.make_repo()

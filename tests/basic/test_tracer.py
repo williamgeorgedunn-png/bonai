@@ -130,6 +130,14 @@ Then I can make the change.
         self.assertEqual([req.direction for req in reqs], ["both", "up"])
         self.assertTrue(all(req.strict for req in reqs))
 
+    def test_parse_fence_direction_applies_to_the_block(self):
+        content = "```trace up\nhandle_request\nsave_record down\n```\n"
+        reqs = parse_trace_requests(content)
+
+        self.assertEqual(reqs[0].direction, "up")
+        # An explicit direction on the line still wins
+        self.assertEqual(reqs[1].direction, "down")
+
     def test_parse_ignores_other_fenced_blocks(self):
         content = """\
 Here is the edit:

@@ -1163,6 +1163,12 @@ class Coder:
         self.test_outcome = None
         self.shell_commands = []
         self.message_cost = 0
+
+        # Trace results only matter while the model is choosing files, so they
+        # expire after one message even if nothing was edited
+        if self.trace_contents:
+            self.cur_messages = self.compact_trace_messages(self.cur_messages)
+
         self.num_trace_rounds = 0
         self.traced_this_turn = set()
         self.trace_contents = set()

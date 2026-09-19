@@ -235,6 +235,7 @@ def parse_trace_requests(content, max_requests=MAX_SYMBOLS_PER_REQUEST):
     in_trace_block = False
     in_other_block = False
     fence_char = None
+    block_direction = "both"
 
     for line in content.splitlines():
         fence = FENCE_RE.match(line)
@@ -251,10 +252,16 @@ def parse_trace_requests(content, max_requests=MAX_SYMBOLS_PER_REQUEST):
             fence_char = line.strip()[0]
             if info == "trace":
                 in_trace_block = True
-                # ```trace up  -> direction applies to the whole block
+                block_direction = "both"
+
                 rest = fence.group("rest")
                 if rest:
-                    add(parse_trace_line(rest))
+                    # ```trace up  -> the direction applies to the whole block
+                    first = parse_trace_line(rest)
+                    if first:
+                        add(first)
+                    elif rest.strip().lower() in DIRECTION_WORDS:
+                        block_direction = DIRECTION_WORDS[rest.strip().lower()]
             else:
                 in_other_block = True
             continue
@@ -263,7 +270,10 @@ def parse_trace_requests(content, max_requests=MAX_SYMBOLS_PER_REQUEST):
             continue
 
         if in_trace_block:
-            add(parse_trace_line(line))
+            req = parse_trace_line(line)
+            if req and req.direction == "both" and block_direction != "both":
+                req = req._replace(direction=block_direction)
+            add(req)
             continue
 
         loose = LOOSE_TRACE_RE.search(line)
