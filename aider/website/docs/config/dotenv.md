@@ -169,6 +169,15 @@ cog.outl("```")
 ## Multiplier for map tokens when no files are specified (default: 2)
 #AIDER_MAP_MULTIPLIER_NO_FILES=true
 
+## Enable /trace and let the LLM ask where symbols are defined and used (default: True)
+#AIDER_TRACE=true
+
+## Automatically trace symbols mentioned in your message, without being asked (default: True)
+#AIDER_AUTO_TRACE=true
+
+## Suggested number of tokens to use for trace results (default: 1024, or map tokens if smaller)
+#AIDER_TRACE_TOKENS=
+
 ################
 # History Files:
 

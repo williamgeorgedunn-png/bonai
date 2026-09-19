@@ -20,6 +20,18 @@ so is usually aware of relevant classes/functions/methods elsewhere in your code
 It's ok to add 1-2 highly relevant files that don't need to be edited,
 but be selective.
 
+## Let aider find the code you can't name
+
+If you don't know which file does something, say what you do know.
+Aider [traces the symbols you mention](https://aider.chat/docs/repomap.html#tracing-code)
+through the repo and shows the LLM where they are called, read and written,
+so it can ask for the right files instead of guessing.
+
+You can also run a trace yourself with `/trace some_function`,
+keep the repo map centered on a symbol with `/focus some_function`,
+or put a single function in the chat with `/snip some_function`
+instead of adding its whole file.
+
 ## Break your goal down into bite sized steps
 
 Do them one at a time. 
@@ -35,6 +47,8 @@ Once you are happy with the approach, just say "go ahead" without the `/ask` pre
 - Use `/clear` to discard the chat history and make a fresh start.
 - Can you `/drop` any extra files?
 - Use `/ask` to discuss a plan before aider starts editing code.
+- If aider keeps editing the wrong place, `/trace` the function involved to see
+  what else touches it, and `/focus` it so the repo map stays on that part of the code.
 - Use the [`/model` command](commands.html) to switch to a different model and try again. Switching between GPT-4o and Sonnet will often get past problems.
 - If aider is hopelessly stuck,
 just code the next step yourself and try having aider code some more after that.

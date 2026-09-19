@@ -22,6 +22,7 @@ from aider.llm import litellm
 from aider.repo import ANY_GIT_ERROR
 from aider.run_cmd import run_cmd
 from aider.scrape import Scraper, install_playwright
+from aider.tracer import parse_trace_line
 from aider.utils import is_image_file
 
 from .dump import dump  # noqa: F401
@@ -416,6 +417,8 @@ class Commands:
 
     def _drop_all_files(self):
         self.coder.abs_fnames = set()
+        if self.coder.snippets:
+            self.coder.snippets.clear()
 
         # When dropping all files, keep those that were originally provided via args.read
         if self.original_read_only_fnames:
@@ -431,6 +434,18 @@ class Commands:
             self.coder.abs_read_only_fnames = to_keep
         else:
             self.coder.abs_read_only_fnames = set()
+
+    def _drop_snippets(self, word):
+        """Drop the snippets that came from a file the user just dropped."""
+
+        if not self.coder.snippets:
+            return
+
+        for rel_fname, symbol in list(self.coder.snippets):
+            abs_fname = self.coder.abs_root_path(rel_fname)
+            if word in rel_fname or word in abs_fname:
+                del self.coder.snippets[(rel_fname, symbol)]
+                self.io.tool_output(f"Removed snippet {rel_fname}: {symbol}")
 
     def _clear_chat_history(self):
         self.coder.done_messages = []
@@ -451,6 +466,10 @@ class Commands:
 
         # system messages
         main_sys = self.coder.fmt_system_prompt(self.coder.gpt_prompts.main_system)
+        if self.coder.tracer and self.coder.gpt_prompts.trace_instructions:
+            main_sys += "\n" + self.coder.fmt_system_prompt(
+                self.coder.gpt_prompts.trace_instructions
+            )
         main_sys += "\n" + self.coder.fmt_system_prompt(self.coder.gpt_prompts.system_reminder)
         msgs = [
             dict(role="system", content=main_sys),
@@ -476,6 +495,18 @@ class Commands:
             if repo_content:
                 tokens = self.coder.main_model.token_count(repo_content)
                 res.append((tokens, "repository map", "use --map-tokens to resize"))
+
+        # snippets
+        snippets_content = self.coder.get_snippets_content()
+        if snippets_content:
+            tokens = self.coder.main_model.token_count(snippets_content)
+            res.append((tokens, "code snippets", "use /unsnip to remove"))
+
+        # auto-traced snippets, which are rebuilt on every message
+        trace_msgs = self.coder.get_trace_messages()
+        if trace_msgs:
+            tokens = self.coder.main_model.token_count(trace_msgs)
+            res.append((tokens, "code traces", "use --no-auto-trace to disable"))
 
         fence = "`" * 3
 
@@ -926,6 +957,8 @@ class Commands:
         for word in filenames:
             # Expand tilde in the path
             expanded_word = os.path.expanduser(word)
+
+            self._drop_snippets(expanded_word)
 
             # Handle read-only files with substring matching and samefile check
             read_only_matched = []
@@ -1414,6 +1447,180 @@ class Commands:
             )
         else:
             self.io.tool_output(f"No new files added from directory {original_name}.")
+
+    def completions_trace(self):
+        return self._symbol_completions()
+
+    def completions_focus(self):
+        return self._symbol_completions()
+
+    def completions_unfocus(self):
+        return sorted(self.coder.focus_idents or [])
+
+    def _symbol_completions(self):
+        if not self.coder.tracer:
+            return []
+
+        try:
+            index = self.coder.get_symbol_index()
+        except Exception:
+            return []
+
+        return index.def_names()
+
+    def cmd_trace(self, args):
+        "Show where a symbol is defined, called, read and written"
+
+        if not self.coder.tracer:
+            self.io.tool_error("Tracing is disabled. It needs a repo map, see --map-tokens.")
+            return
+
+        args = args.strip()
+        if not args:
+            self.io.tool_error("Please provide a symbol to trace, eg: /trace get_repo_map up")
+            return
+
+        req = parse_trace_line(args)
+        if not req:
+            self.io.tool_error(f"Can't read a symbol name out of: {args}")
+            return
+
+        result = self.coder.run_trace(req)
+        if not result:
+            self.io.tool_output(f"No trace results for {req.symbol}.")
+            return
+
+        self.io.tool_output(result)
+
+        token_count = self.coder.main_model.token_count(result)
+        k_tokens = token_count / 1000
+
+        if not self.io.confirm_ask(f"Add {k_tokens:.1f}k tokens of trace results to the chat?"):
+            return
+
+        trace_text = self.coder.gpt_prompts.trace_results_prefix + result
+
+        self.coder.cur_messages += [
+            dict(role="user", content=trace_text),
+            dict(role="assistant", content=self.coder.gpt_prompts.trace_results_reply),
+        ]
+
+        # These results haven't been sent yet, so they expire a message later
+        # than the ones the model asks for itself
+        self.coder.pending_trace_contents.add(trace_text)
+
+    def completions_snip(self):
+        return self._symbol_completions()
+
+    def cmd_snip(self, args):
+        "Add just one function/class to the chat as a read-only snippet, not the whole file"
+
+        if not self.coder.tracer:
+            self.io.tool_error("Snippets need a repo map, see --map-tokens.")
+            return
+
+        args = args.strip()
+        if not args:
+            self.io.tool_output("Usage: /snip symbol, /snip Class.method or /snip file.py:symbol")
+            if self.coder.snippets:
+                self.io.tool_output("Snippets in the chat:")
+                for rel_fname, symbol in self.coder.snippets:
+                    self.io.tool_output(f"  {rel_fname}: {symbol}")
+            return
+
+        req = parse_trace_line(args)
+        if not req:
+            self.io.tool_error(f"Can't read a symbol name out of: {args}")
+            return
+
+        try:
+            index = self.coder.get_symbol_index()
+            _name, _container, defs = self.coder.tracer.resolve(index, req)
+        except Exception as err:
+            self.io.tool_error(f"Unable to look up {req.symbol}: {err}")
+            return
+
+        if not defs:
+            self.io.tool_error(f"No definition of {req.symbol} found in the repo.")
+            return
+
+        if len(defs) > 1:
+            self.io.tool_error(f"{req.symbol} is defined in several places, pick one:")
+            for tag in defs:
+                self.io.tool_output(f"  {tag.rel_fname}:{tag.line + 1}")
+            return
+
+        scope = index.scope_for_def(defs[0])
+        if not scope:
+            self.io.tool_error(f"Can't work out the extent of {req.symbol}.")
+            return
+
+        if scope.rel_fname in self.coder.get_chat_rel_fnames():
+            self.io.tool_warning(
+                f"{scope.rel_fname} is already in the chat in full, so the snippet won't be sent"
+                " until you /drop the file."
+            )
+
+        self.coder.add_snippet(
+            scope.rel_fname, index.qualified_name(scope), scope.start_line, scope.end_line
+        )
+        num_lines = scope.end_line - scope.start_line + 1
+        self.io.tool_output(
+            f"Added {scope.rel_fname}:{scope.start_line + 1}-{scope.end_line + 1}"
+            f" ({num_lines} lines) as a read-only snippet."
+        )
+
+    def cmd_unsnip(self, args):
+        "Remove snippets from the chat, all of them or the named ones"
+
+        if not self.coder.snippets:
+            self.io.tool_output("There are no snippets in the chat.")
+            return
+
+        args = args.strip()
+        if not args:
+            self.coder.snippets.clear()
+            self.io.tool_output("Removed all snippets from the chat.")
+            return
+
+        wanted = [word for word in re.split(r"[,\s]+", args) if word]
+        for rel_fname, symbol in list(self.coder.snippets):
+            if any(word in symbol or word in rel_fname for word in wanted):
+                del self.coder.snippets[(rel_fname, symbol)]
+                self.io.tool_output(f"Removed snippet {rel_fname}: {symbol}")
+
+    def cmd_focus(self, args):
+        "Keep the repo map centered on these symbols, across turns"
+
+        idents = [ident for ident in re.split(r"[,\s]+", args.strip()) if ident]
+
+        if not idents:
+            if self.coder.focus_idents:
+                self.io.tool_output("Focused on: " + ", ".join(sorted(self.coder.focus_idents)))
+            else:
+                self.io.tool_output("Not focused on any symbols. Try: /focus get_repo_map")
+            return
+
+        self.coder.focus_idents.update(idents)
+        self.io.tool_output("Focused on: " + ", ".join(sorted(self.coder.focus_idents)))
+
+    def cmd_unfocus(self, args):
+        "Stop focusing the repo map on symbols, or on the named ones"
+
+        idents = [ident for ident in re.split(r"[,\s]+", args.strip()) if ident]
+
+        if not idents:
+            self.coder.focus_idents.clear()
+            self.io.tool_output("No longer focused on any symbols.")
+            return
+
+        for ident in idents:
+            self.coder.focus_idents.discard(ident)
+
+        if self.coder.focus_idents:
+            self.io.tool_output("Focused on: " + ", ".join(sorted(self.coder.focus_idents)))
+        else:
+            self.io.tool_output("No longer focused on any symbols.")
 
     def cmd_map(self, args):
         "Print out the current repository map"
