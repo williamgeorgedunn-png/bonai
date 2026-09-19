@@ -38,6 +38,10 @@ It can also access
 local models that provide an
 [Open AI compatible API](/docs/llms/openai-compat.html).
 
+To run **two local models on two GPUs** — a planner and a small editor —
+see [pipeline mode](/docs/usage/pipeline.html) and
+[two local models on two GPUs](/docs/llms/dual-gpu-local.html).
+
 ## Use a capable model
 {: .no_toc }
 

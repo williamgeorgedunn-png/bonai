@@ -74,6 +74,9 @@ cog.out(get_help_md())
 
 <!--[[[end]]]-->
 
+See also [pipeline mode](pipeline.html) (`/pipeline`) and
+[tracing code](tracing.html) (`/trace`, `/tests`, `/focus`, `/snip`).
+
 {: .tip }
 You can easily re-send commands or messages.
 Use the up arrow ⬆ to scroll back

@@ -5,6 +5,10 @@ nav_order: 450
 
 # Two local models on two GPUs
 
+A GitHub-readable how-to that covers both setup and a typical session is in
+[`docs/using-pipeline-and-dual-gpu.md`](https://github.com/williamgeorgedunn-png/bonai/blob/main/docs/using-pipeline-and-dual-gpu.md).
+This page is the hardware and server detail.
+
 [Pipeline mode](../usage/pipeline.html) runs a planning **architect** and a
 small editing **worker**. This page sets both up as local servers, one per GPU,
 on Windows or Linux.
