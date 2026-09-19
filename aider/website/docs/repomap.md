@@ -104,6 +104,85 @@ These are the key pieces of context that the LLM needs to know to understand
 the overall codebase.
 
 
+## Tracing code
+
+The repo map shows *definitions*. It doesn't show how they connect, so a model
+often can't tell where something is actually done, and ends up guessing which
+files to ask for.
+
+Tracing fills that gap. It searches the same tree-sitter data the repo map is
+built from and reports where a symbol is defined, called, read and written, as
+short snippets rather than whole files:
+
+- Aider traces symbols you mention, and symbols the LLM mentions, automatically.
+  The results are attached to the request being sent, and are thrown away
+  afterwards, so they never accumulate in the chat history.
+- The LLM can also ask for a trace itself, by replying with a fenced block
+  marked `trace` containing the names it wants. Aider answers with the results
+  and lets it try again, the same way it handles a request to add files.
+- You can run one yourself with `/trace some_function`, optionally with `up`
+  for just the callers or `down` for just what it uses.
+
+A trace looks like this:
+
+```
+Trace of `handle_request` (function/class, defined at app/service.py:8):
+
+Definition:
+app/service.py:
+...⋮...
+  8│def handle_request(raw_value):
+...⋮...
+
+Callers of `handle_request` (1 found):
+app/api.py:
+...⋮...
+  4│def post(raw_value):
+  5│    return handle_request(raw_value)
+
+`handle_request` uses these, defined elsewhere in the repo:
+- save_record -> app/storage.py:4
+- normalize -> app/service.py:4
+
+Ask me to *add* only the files you actually need to see or edit.
+```
+
+Tracing works for variables and attributes too, splitting the results into
+where the value is set and where it is read, and following the value one hop
+through function calls and returns:
+
+```
+How the value flows:
+- app/service.py:9: value comes from normalize() at app/service.py:4
+- app/service.py:10: passed to save_record() as argument 1, defined at app/storage.py:4
+- app/service.py:11: returned from the enclosing function
+```
+
+Results are ranked the same way the repo map is ranked, and are trimmed to fit
+the token budget, so a symbol with hundreds of call sites returns the most
+relevant ones plus a list of the other files to ask about.
+
+Tracing is deterministic: it is based on the names in your code, not on a
+language server or a type checker. That makes it cheap and predictable, but it
+means dynamically dispatched calls can be missed, and a very common name may
+come back asking you to be more specific.
+
+A name like `count` is used everywhere, so ask for one place instead:
+
+- `/trace count in app/service.py` searches only that file.
+- `/trace handle_request.count` searches only inside that function or class.
+
+Use `--trace-tokens` to size the results, `--no-auto-trace` to only trace when
+asked, and `--no-trace` to turn it off. Tracing needs the repo map, so it is
+off whenever the map is.
+
+Two related commands help keep the context small:
+
+- `/focus some_symbol` keeps the repo map centered on a symbol across turns.
+- `/snip some_function` adds just that function to the chat as a read-only
+  snippet, instead of its whole file. Adding the whole file supersedes its
+  snippets, and dropping the file removes them.
+
 ## More info
 
 Please check the

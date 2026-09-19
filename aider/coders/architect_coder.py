@@ -14,6 +14,12 @@ class ArchitectCoder(AskCoder):
         if not content or not content.strip():
             return
 
+        # Let the architect look around before handing anything to the editor
+        trace_message = self.get_trace_reply(content)
+        if trace_message and self.num_reflections < self.max_reflections - 1:
+            self.reflected_message = trace_message
+            return True
+
         if not self.auto_accept_architect and not self.io.confirm_ask("Edit the files?"):
             return
 

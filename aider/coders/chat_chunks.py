@@ -10,6 +10,7 @@ class ChatChunks:
     repo: List = field(default_factory=list)
     readonly_files: List = field(default_factory=list)
     chat_files: List = field(default_factory=list)
+    trace: List = field(default_factory=list)
     cur: List = field(default_factory=list)
     reminder: List = field(default_factory=list)
 
@@ -21,6 +22,8 @@ class ChatChunks:
             + self.repo
             + self.done
             + self.chat_files
+            # Traces sit after the cacheable chunks: they change every message
+            + self.trace
             + self.cur
             + self.reminder
         )
