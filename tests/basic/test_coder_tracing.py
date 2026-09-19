@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from pathlib import Path
@@ -37,6 +38,14 @@ def post(raw_value):
     return handle_request(raw_value)
 """
 
+TEST_SERVICE_PY = """\
+from service import handle_request
+
+
+def test_handle_request_strips():
+    assert handle_request(" x ") == "x"
+"""
+
 EDIT_AND_TRACE = """\
 Here is the change, and I need to see the callers too.
 
@@ -62,9 +71,12 @@ class TestCoderTracing(unittest.TestCase):
             "service.py": SERVICE_PY,
             "storage.py": STORAGE_PY,
             "api.py": API_PY,
+            "tests/test_service.py": TEST_SERVICE_PY,
         }
         for fname, content in files.items():
-            Path(fname).write_text(content)
+            path = Path(fname)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
 
         repo = git.Repo.init(os.getcwd())
         repo.git.add(A=True)
@@ -74,6 +86,7 @@ class TestCoderTracing(unittest.TestCase):
 
     def make_coder(self, **kwargs):
         io = InputOutput(yes=True)
+        kwargs.setdefault("llm_log", False)
         return Coder.create(self.GPT35, "diff", io=io, use_git=True, **kwargs)
 
     def reply_with(self, coder, content):
@@ -464,6 +477,132 @@ class TestCoderTracing(unittest.TestCase):
 
             self.assertIn("save_record", ask_coder.focus_idents)
             self.assertIn(("storage.py", "save_record"), ask_coder.snippets)
+
+    def test_file_add_prompt_says_why_the_file_was_suggested(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.get_trace_reply("```trace\nhandle_request\n```\n")
+            self.assertTrue(coder.file_reason_text("api.py"))
+
+            asked = []
+
+            def capture(question, subject=None, **kwargs):
+                asked.append(subject)
+                return True
+
+            coder.io.confirm_ask = capture
+            coder.check_for_file_mentions("Please add api.py")
+
+            self.assertTrue(asked)
+            self.assertIn("api.py", asked[0])
+            self.assertIn("handle_request", asked[0])
+
+    def test_tests_command_adds_the_test_as_a_snippet(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.commands.cmd_tests("handle_request")
+
+            self.assertTrue(
+                any("test_service.py" in key[0] for key in coder.snippets),
+                coder.snippets,
+            )
+
+    def test_limitation_log_records_unknown_and_tool_xml(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            log_path = Path(".aider.llm-limitations.jsonl")
+            coder = self.make_coder(map_tokens=1024, llm_log=True, llm_log_file=str(log_path))
+
+            coder.get_trace_reply("```trace\nzzzz_not_here\n```\n")
+            coder.get_trace_reply(
+                "<tool_call>\n<function=trace>\n<parameter=name>handle_request</parameter>\n"
+                "</function>\n</tool_call>\n"
+            )
+
+            kinds = [json.loads(line)["kind"] for line in log_path.read_text().splitlines() if line]
+            self.assertIn("trace.unknown", kinds)
+            self.assertIn("trace.tool_xml", kinds)
+
+    def test_file_reasons_expire_after_one_extra_message(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.get_trace_reply("```trace\nhandle_request\n```\n")
+            self.assertTrue(coder.file_reason_text("api.py"))
+
+            coder.init_before_message()
+            self.assertTrue(coder.file_reason_text("api.py"))
+
+            coder.init_before_message()
+            self.assertEqual(coder.file_reason_text("api.py"), "")
+
+    def test_tests_command_ignores_an_extra_direction(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            printed = []
+            coder.io.tool_output = lambda msg="", **k: printed.append(str(msg))
+            coder.commands.cmd_tests("handle_request up")
+
+            text = "\n".join(printed)
+            self.assertIn("Tests that exercise", text)
+            self.assertNotIn("Callers of", text)
+
+    def test_shared_limitation_log_uses_the_new_edit_format(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            log_path = Path(".aider.llm-limitations.jsonl")
+            coder = self.make_coder(map_tokens=1024, llm_log=True, llm_log_file=str(log_path))
+
+            ask = Coder.create(from_coder=coder, edit_format="ask")
+            self.assertEqual(ask.edit_format, "ask")
+            ask.log_limitation("probe")
+
+            entry = json.loads(log_path.read_text().splitlines()[-1])
+            self.assertEqual(entry["kind"], "probe")
+            self.assertEqual(entry["edit_format"], "ask")
+
+    def test_rate_limit_logs_llm_error_once(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            log_path = Path(".aider.llm-limitations.jsonl")
+            coder = self.make_coder(map_tokens=1024, llm_log=True, llm_log_file=str(log_path))
+
+            from unittest.mock import patch
+
+            from litellm.exceptions import RateLimitError
+
+            def boom(*args, **kwargs):
+                raise RateLimitError("slow down", "openai", "gpt-3.5-turbo")
+
+            coder.main_model.send_completion = boom
+            coder.init_before_message()
+            with patch("aider.coders.base_coder.time.sleep"):
+                list(coder.send_message("hello"))
+
+            kinds = [json.loads(line)["kind"] for line in log_path.read_text().splitlines() if line]
+            self.assertEqual(kinds.count("llm.error"), 1)
+
+    def test_tool_xml_inside_a_fence_is_not_a_trace_attempt(self):
+        from aider.limitation_log import LimitationLog
+
+        log = LimitationLog(path=None, enabled=False)
+        self.assertFalse(
+            log.looks_like_tool_xml(
+                "Here is the edit:\n```xml\n<parameter>count</parameter>\n```\n"
+            )
+        )
+        self.assertTrue(
+            log.looks_like_tool_xml("<tool_call><function=trace></function></tool_call>")
+        )
+        self.assertFalse(log.looks_like_trace_attempt("Trace files are stored in /tmp.\n"))
+        self.assertTrue(log.looks_like_trace_attempt("```trace\nfoo\n```\n"))
 
 
 if __name__ == "__main__":

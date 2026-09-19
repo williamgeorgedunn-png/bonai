@@ -46,7 +46,7 @@ CALLABLE_KINDS = {
 
 DATA_KINDS = {"variable", "constant", "field", "property", "parameter"}
 
-DIRECTIONS = ("up", "down", "both")
+DIRECTIONS = ("up", "down", "both", "tests")
 
 DIRECTION_WORDS = {
     "up": "up",
@@ -70,6 +70,9 @@ DIRECTION_WORDS = {
     "both": "both",
     "all": "both",
     "full": "both",
+    "tests": "tests",
+    "test": "tests",
+    "testing": "tests",
 }
 
 MAX_SYMBOLS_PER_REQUEST = 3
@@ -81,6 +84,7 @@ MAX_FILES_BEFORE_AMBIGUOUS = 14
 MAX_LOIS_PER_FILE = 8
 MAX_LOIS_PER_SCOPE = 2
 MAX_CALLEES = 12
+MAX_TESTS = 8
 MAX_SCAN_BYTES = 1_000_000
 
 # Variables aren't in the tags index, so they need a file scan. Cap it so a
@@ -180,6 +184,19 @@ SYMBOL_RE = re.compile(r"^[A-Za-z_][\w.:/\\-]*$")
 
 def is_test_path(rel_fname):
     return bool(TEST_PATH_RE.search(rel_fname.replace("\\", "/")))
+
+
+def split_test_hits(hits):
+    """Partition hits into (production, tests) without changing their order."""
+
+    production = []
+    tests = []
+    for hit in hits:
+        if is_test_path(hit.rel_fname):
+            tests.append(hit)
+        else:
+            production.append(hit)
+    return production, tests
 
 
 def clean_symbol(text):
@@ -380,6 +397,12 @@ class RepoTracer:
         # the symbol being traced lives in the tests itself.
         self.prefer_tests = False
 
+        # rel_fname -> [reason, ...], filled by the latest trace() so the
+        # coder can tell the user *why* a file is being suggested
+        self.last_file_reasons = {}
+        self.last_test_hits = []
+        self.last_status = "ok"
+
     ##
     # Plumbing
     ##
@@ -401,6 +424,16 @@ class RepoTracer:
 
         test_penalty = 0 if self.prefer_tests else int(is_test_path(rel_fname))
         return (test_penalty, -self.file_rank(rel_fname), rel_fname)
+
+    def note_file(self, rel_fname, reason):
+        """Remember why this file appeared in the latest trace."""
+
+        if not rel_fname or not reason:
+            return
+
+        reasons = self.last_file_reasons.setdefault(rel_fname, [])
+        if reason not in reasons:
+            reasons.append(reason)
 
     def read_text(self, abs_fname):
         try:
@@ -528,13 +561,21 @@ class RepoTracer:
         max_tokens = max_tokens or self.max_tokens
         chat_rel_fnames = set(chat_rel_fnames or ())
 
+        self.last_file_reasons = {}
+        self.last_test_hits = []
+        self.last_status = "ok"
+
         index = self.get_index(all_fnames, progress=progress)
         name, container, defs = self.resolve(index, req)
 
         # Only let test files lead the results when the symbol lives in tests
-        self.prefer_tests = bool(defs) and all(is_test_path(tag.rel_fname) for tag in defs)
+        # or when we were asked specifically for the tests
+        self.prefer_tests = req.direction == "tests" or (
+            bool(defs) and all(is_test_path(tag.rel_fname) for tag in defs)
+        )
 
         if len(defs) > MAX_DEFS_BEFORE_AMBIGUOUS:
+            self.last_status = "ambiguous"
             return self.render_ambiguous_defs(index, req, name, defs)
 
         kind = self.symbol_kind(index, defs)
@@ -543,7 +584,11 @@ class RepoTracer:
         # what tells the model what to do with the results.
         footer_allowance = 40
 
-        if kind == "callable":
+        if req.direction == "tests":
+            text, shown_files = self.trace_tests(
+                index, req, name, container, defs, chat_rel_fnames, max_tokens - footer_allowance
+            )
+        elif kind == "callable":
             text, shown_files = self.trace_callable(
                 index, req, name, defs, chat_rel_fnames, max_tokens - footer_allowance
             )
@@ -600,6 +645,9 @@ class RepoTracer:
         header = self.describe_symbol(index, req.symbol, "function/class", def_scopes)
         sections.append(header)
 
+        for scope in def_scopes:
+            self.note_file(scope.rel_fname, f"defines `{name}`")
+
         budget = max_tokens
 
         # Where it is defined. Callers are the point of the trace, so the
@@ -611,15 +659,17 @@ class RepoTracer:
 
         callers_files = set()
         callee_files = set()
+        test_files = set()
 
         if req.direction in ("up", "both"):
             hits, total, skipped_in_chat = self.find_callers(
                 index, name, def_scopes, chat_rel_fnames
             )
+            prod_hits, test_hits = split_test_hits(hits)
             text, shown_files = self.render_hits(
                 index,
-                hits,
-                total,
+                prod_hits,
+                len(prod_hits),
                 max(budget, 0) * (0.7 if req.direction == "both" else 1.0),
                 title=f"Callers of `{name}`",
                 empty=f"No calls to `{name}` found outside its own definition.",
@@ -628,6 +678,10 @@ class RepoTracer:
             callers_files = shown_files
             budget -= self.token_count(text)
             sections.append(text)
+
+            listing, test_files = self.render_test_index(name, test_hits)
+            if listing:
+                sections.append(listing)
 
         if req.direction in ("down", "both"):
             text, callee_files = self.render_callees(index, name, def_scopes, chat_rel_fnames)
@@ -639,7 +693,7 @@ class RepoTracer:
 
         text = "\n".join(section for section in sections if section)
 
-        return text, callers_files | callee_files
+        return text, callers_files | callee_files | test_files
 
     def find_callers(self, index, name, def_scopes, chat_rel_fnames):
         """Reference sites for `name`, excluding its own body (recursion)."""
@@ -668,6 +722,11 @@ class RepoTracer:
             scope = index.innermost_scope(tag.rel_fname, tag.line)
             scope_name = index.qualified_name(scope) if scope else ""
             hits.append(Hit(tag.rel_fname, tag.line, "call", scope_name, ""))
+
+            if is_test_path(tag.rel_fname):
+                self.note_file(tag.rel_fname, self.reason_for_hit(name, "tests", scope_name))
+            else:
+                self.note_file(tag.rel_fname, self.reason_for_hit(name, "calls", scope_name))
 
         return hits, total, skipped_in_chat
 
@@ -729,6 +788,114 @@ class RepoTracer:
 
         return "\n".join(lines), files
 
+    def reason_for_hit(self, name, verb, scope_name):
+        """A short 'why this file' phrase for one hit."""
+
+        if scope_name:
+            return f"{verb} `{name}` from `{scope_name}`"
+        return f"{verb} `{name}`"
+
+    def note_hits(self, name, hits):
+        """Record why each file appeared, after we know the name is not too common."""
+
+        for hit in hits:
+            if is_test_path(hit.rel_fname):
+                verb = "tests"
+            elif hit.kind in ("write", "param"):
+                verb = "writes"
+            elif hit.kind == "call":
+                verb = "calls"
+            else:
+                verb = "reads"
+            self.note_file(hit.rel_fname, self.reason_for_hit(name, verb, hit.scope_name))
+
+    def unique_test_hits(self, test_hits):
+        """Deduped test hits, one per enclosing function, richest file first."""
+
+        unique = []
+        seen = set()
+        for hit in sorted(
+            test_hits, key=lambda hit: self.file_sort_key(hit.rel_fname) + (hit.line,)
+        ):
+            key = (hit.rel_fname, hit.scope_name or hit.line)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(hit)
+        return unique
+
+    def render_test_index(self, name, test_hits):
+        """A compact list of the tests that exercise `name`, not snippets."""
+
+        if not test_hits:
+            return "", set()
+
+        unique = self.unique_test_hits(test_hits)
+        shown = unique[:MAX_TESTS]
+        files = {hit.rel_fname for hit in shown}
+        lines = [
+            f"- {hit.rel_fname}: `{hit.scope_name or f'line {hit.line + 1}'}`" for hit in shown
+        ]
+        if len(unique) > len(shown):
+            lines.append(f"- ...and {len(unique) - len(shown)} more")
+
+        # Only the tests we actually listed, so /tests adds what the user saw
+        self.last_test_hits = shown
+        header = f"\nTests that exercise `{name}` ({len(unique)} found):"
+        return header + "\n" + "\n".join(lines), files
+
+    def trace_tests(self, index, req, name, container, defs, chat_rel_fnames, max_tokens):
+        """Show the tests that exercise a symbol, as short function snippets."""
+
+        kind = self.symbol_kind(index, defs)
+        def_scopes = [index.scope_for_def(tag) for tag in defs]
+        def_scopes = [scope for scope in def_scopes if scope]
+
+        if kind == "callable":
+            hits, total, skipped_in_chat = self.find_callers(
+                index, name, def_scopes, chat_rel_fnames
+            )
+            _prod, test_hits = split_test_hits(hits)
+        else:
+            attribute = self.looks_like_attribute(index, req, name, defs)
+            scan_files = [
+                rel
+                for rel in self.scan_files(index, req, name, container, defs)
+                if is_test_path(rel)
+            ]
+            hits, total, skipped_in_chat, _counts, _trunc = self.find_occurrences(
+                index,
+                name,
+                scan_files,
+                chat_rel_fnames,
+                attribute=attribute,
+                container=container,
+            )
+            test_hits = hits
+
+        if not test_hits:
+            self.last_status = "unknown"
+            return f"\nNo tests that exercise `{req.symbol}` found in the repo.", set()
+
+        self.note_hits(name, test_hits)
+
+        kind_label = "function/class" if kind == "callable" else "variable"
+        sections = [self.describe_symbol(index, req.symbol, kind_label, def_scopes)]
+        self.last_test_hits = self.unique_test_hits(test_hits)[:MAX_TESTS]
+
+        text, shown_files = self.render_hits(
+            index,
+            test_hits,
+            len(test_hits),
+            max(max_tokens, 0),
+            title=f"Tests that exercise `{name}`",
+            empty=f"No tests that exercise `{name}` found.",
+            skipped_in_chat=skipped_in_chat,
+        )
+        sections.append(text)
+
+        return "\n".join(section for section in sections if section), shown_files
+
     def is_noisy(self, index, ident):
         """Mirror the repo map's own heuristics for uninteresting identifiers."""
 
@@ -761,6 +928,7 @@ class RepoTracer:
         )
 
         if not hits and not total:
+            self.last_status = "unknown"
             if container:
                 lines = [
                     f"\nNo uses of `{name}` found inside `{container}`."
@@ -772,11 +940,17 @@ class RepoTracer:
             return "\n".join(line for line in lines if line), set()
 
         if len(file_counts) > MAX_FILES_BEFORE_AMBIGUOUS:
+            self.last_status = "ambiguous"
             return self.render_ambiguous_files(req, name, total, file_counts), set()
+
+        self.note_hits(name, hits)
 
         kind_label = "attribute" if attribute else "variable"
         def_scopes = [index.scope_for_def(tag) for tag in defs]
         def_scopes = [scope for scope in def_scopes if scope]
+
+        for scope in def_scopes:
+            self.note_file(scope.rel_fname, f"defines `{name}`")
 
         sections = [self.describe_symbol(index, req.symbol, kind_label, def_scopes)]
 

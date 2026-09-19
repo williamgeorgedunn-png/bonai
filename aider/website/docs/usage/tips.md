@@ -28,6 +28,7 @@ through the repo and shows the LLM where they are called, read and written,
 so it can ask for the right files instead of guessing.
 
 You can also run a trace yourself with `/trace some_function`,
+see the tests that exercise it with `/tests some_function`,
 keep the repo map centered on a symbol with `/focus some_function`,
 or put a single function in the chat with `/snip some_function`
 instead of adding its whole file.
