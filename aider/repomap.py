@@ -28,13 +28,28 @@ from grep_ast.tsl import USING_TSL_PACK, get_language, get_parser  # noqa: E402
 
 Tag = namedtuple("Tag", "rel_fname fname line name kind".split())
 
+# The source range of a definition (function, class, method, ...), used to
+# answer "which definition encloses line N" and to extract snippets.
+Scope = namedtuple("Scope", "rel_fname fname name kind start_line end_line".split())
+
+# Node types that enclose a definition, used when a language's tags query
+# doesn't capture the definition node itself.
+SCOPE_NODE_SUFFIXES = (
+    "_definition",
+    "_declaration",
+    "_specifier",
+    "_item",
+    "_statement",
+    "_method",
+    "_block",
+)
 
 SQLITE_ERRORS = (sqlite3.OperationalError, sqlite3.DatabaseError, OSError)
 
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 if USING_TSL_PACK:
-    CACHE_VERSION = 4
+    CACHE_VERSION = 5
 
 UPDATING_REPO_MAP_MESSAGE = "Updating repo map"
 
@@ -80,6 +95,12 @@ class RepoMap:
         self.map_cache = {}
         self.map_processing_time = 0
         self.last_map = None
+
+        # Populated by get_ranked_tags(), reused to rank trace results
+        self.last_ranked = {}
+
+        self.symbol_index = None
+        self.symbol_index_key = None
 
         if self.verbose:
             self.io.tool_output(
@@ -243,7 +264,7 @@ class RepoMap:
             self.tags_cache_error(e)
             val = self.TAGS_CACHE.get(cache_key)
 
-        if val is not None and val.get("mtime") == file_mtime:
+        if val is not None and val.get("mtime") == file_mtime and "scopes" in val:
             try:
                 return self.TAGS_CACHE[cache_key]["data"]
             except SQLITE_ERRORS as e:
@@ -251,17 +272,35 @@ class RepoMap:
                 return self.TAGS_CACHE[cache_key]["data"]
 
         # miss!
-        data = list(self.get_tags_raw(fname, rel_fname))
+        data, scopes = self.get_tags_and_scopes_raw(fname, rel_fname)
 
         # Update the cache
+        entry = {"mtime": file_mtime, "data": data, "scopes": scopes}
         try:
-            self.TAGS_CACHE[cache_key] = {"mtime": file_mtime, "data": data}
+            self.TAGS_CACHE[cache_key] = entry
             self.save_tags_cache()
         except SQLITE_ERRORS as e:
             self.tags_cache_error(e)
-            self.TAGS_CACHE[cache_key] = {"mtime": file_mtime, "data": data}
+            self.TAGS_CACHE[cache_key] = entry
 
         return data
+
+    def get_scopes(self, fname, rel_fname):
+        """Definition ranges for a file, in the same cache entry as its tags."""
+
+        # Populate/refresh the cache entry
+        self.get_tags(fname, rel_fname)
+
+        try:
+            val = self.TAGS_CACHE.get(fname)
+        except SQLITE_ERRORS as e:
+            self.tags_cache_error(e)
+            val = self.TAGS_CACHE.get(fname)
+
+        if not val:
+            return []
+
+        return val.get("scopes") or []
 
     def _run_captures(self, query: Query, node):
         # tree-sitter 0.23.2's python bindings had captures directly on the Query object
@@ -277,25 +316,47 @@ class RepoMap:
         return cursor.captures(node)
 
     def get_tags_raw(self, fname, rel_fname):
+        tags, _scopes = self.get_tags_and_scopes_raw(fname, rel_fname)
+        return tags
+
+    def get_definition_range(self, name_node, def_node_ids):
+        """Line range of the definition that `name_node` names."""
+
+        node = name_node
+        while node is not None:
+            if node.id in def_node_ids:
+                return node.start_point[0], node.end_point[0]
+            node = node.parent
+
+        # Languages whose tags query doesn't capture the definition node
+        node = name_node.parent
+        while node is not None:
+            if node.type.endswith(SCOPE_NODE_SUFFIXES) and node.end_point[0] > node.start_point[0]:
+                return node.start_point[0], node.end_point[0]
+            node = node.parent
+
+        return name_node.start_point[0], name_node.end_point[0]
+
+    def get_tags_and_scopes_raw(self, fname, rel_fname):
         lang = filename_to_lang(fname)
         if not lang:
-            return
+            return [], []
 
         try:
             language = get_language(lang)
             parser = get_parser(lang)
         except Exception as err:
             print(f"Skipping file {fname}: {err}")
-            return
+            return [], []
 
         query_scm = get_scm_fname(lang)
         if not query_scm.exists():
-            return
+            return [], []
         query_scm = query_scm.read_text()
 
         code = self.io.read_text(fname)
         if not code:
-            return
+            return [], []
         tree = parser.parse(bytes(code, "utf-8"))
 
         # Run the tags queries
@@ -314,6 +375,15 @@ class RepoMap:
         else:
             all_nodes = matches
 
+        def_node_ids = set()
+        for tag, nodes in captures.items():
+            if tag.startswith("definition."):
+                for node in nodes:
+                    def_node_ids.add(node.id)
+
+        tags = []
+        scopes = []
+        seen_scopes = set()
         saw = set()
         for node, tag in all_nodes:
             if tag.startswith("name.definition."):
@@ -325,20 +395,38 @@ class RepoMap:
 
             saw.add(kind)
 
-            result = Tag(
-                rel_fname=rel_fname,
-                fname=fname,
-                name=node.text.decode("utf-8"),
-                kind=kind,
-                line=node.start_point[0],
+            name = node.text.decode("utf-8")
+
+            tags.append(
+                Tag(
+                    rel_fname=rel_fname,
+                    fname=fname,
+                    name=name,
+                    kind=kind,
+                    line=node.start_point[0],
+                )
             )
 
-            yield result
+            if kind != "def":
+                continue
+
+            start_line, end_line = self.get_definition_range(node, def_node_ids)
+            scope = Scope(
+                rel_fname=rel_fname,
+                fname=fname,
+                name=name,
+                kind=tag[len("name.definition.") :],
+                start_line=start_line,
+                end_line=end_line,
+            )
+            if scope not in seen_scopes:
+                seen_scopes.add(scope)
+                scopes.append(scope)
 
         if "ref" in saw:
-            return
+            return tags, scopes
         if "def" not in saw:
-            return
+            return tags, scopes
 
         # We saw defs, without any refs
         # Some tags files only provide defs (cpp, for example)
@@ -348,19 +436,64 @@ class RepoMap:
             lexer = guess_lexer_for_filename(fname, code)
         except Exception:  # On Windows, bad ref to time.clock which is deprecated?
             # self.io.tool_error(f"Error lexing {fname}")
-            return
+            return tags, scopes
 
         tokens = list(lexer.get_tokens(code))
         tokens = [token[1] for token in tokens if token[0] in Token.Name]
 
         for token in tokens:
-            yield Tag(
-                rel_fname=rel_fname,
-                fname=fname,
-                name=token,
-                kind="ref",
-                line=-1,
+            tags.append(
+                Tag(
+                    rel_fname=rel_fname,
+                    fname=fname,
+                    name=token,
+                    kind="ref",
+                    line=-1,
+                )
             )
+
+        return tags, scopes
+
+    def get_symbol_index(self, fnames, progress=None):
+        """Build (or reuse) a SymbolIndex over `fnames`.
+
+        The index is rebuilt when the file set or any mtime changes, which is
+        the same staleness rule the tags cache uses.
+        """
+
+        fnames = sorted(set(fnames))
+
+        key = []
+        for fname in fnames:
+            try:
+                key.append((fname, os.path.getmtime(fname)))
+            except OSError:
+                continue
+        key = tuple(key)
+
+        if self.symbol_index is not None and key == self.symbol_index_key:
+            return self.symbol_index
+
+        index = SymbolIndex()
+        for fname, _mtime in key:
+            if progress:
+                progress(f"Indexing symbols: {fname}")
+
+            rel_fname = self.get_rel_fname(fname)
+            try:
+                tags = self.get_tags(fname, rel_fname) or []
+                scopes = self.get_scopes(fname, rel_fname)
+            except Exception as err:
+                if self.verbose:
+                    self.io.tool_warning(f"Unable to index {fname}: {err}")
+                continue
+
+            index.add_file(rel_fname, fname, tags, scopes)
+
+        self.symbol_index = index
+        self.symbol_index_key = key
+
+        return index
 
     def get_ranked_tags(
         self, chat_fnames, other_fnames, mentioned_fnames, mentioned_idents, progress=None
@@ -529,6 +662,8 @@ class RepoMap:
                 ranked = nx.pagerank(G, weight="weight")
             except ZeroDivisionError:
                 return []
+
+        self.last_ranked = dict(ranked)
 
         # distribute the rank from each source node, across all of its out edges
         ranked_definitions = defaultdict(float)
@@ -782,6 +917,89 @@ class RepoMap:
         output = "\n".join([line[:100] for line in output.splitlines()]) + "\n"
 
         return output
+
+
+class SymbolIndex:
+    """Definitions, references and definition ranges for a set of files.
+
+    Built from the same tree-sitter tags that drive the repo map, so it is
+    cheap to (re)build once the tags cache is warm.
+    """
+
+    def __init__(self):
+        self.defs = defaultdict(list)  # name -> [Tag]
+        self.refs = defaultdict(list)  # name -> [Tag]
+        self.refs_by_file = defaultdict(list)  # rel_fname -> [Tag], sorted by line
+        self.scopes = dict()  # rel_fname -> [Scope], sorted outermost first
+        self.abs_fnames = dict()  # rel_fname -> abs fname
+
+    def add_file(self, rel_fname, abs_fname, tags, scopes):
+        self.abs_fnames[rel_fname] = abs_fname
+
+        file_refs = []
+        # Some tags queries capture the same name on the same line more than once
+        seen = set()
+        for tag in tags:
+            key = (tag.kind, tag.name, tag.line)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if tag.kind == "def":
+                self.defs[tag.name].append(tag)
+            elif tag.kind == "ref" and tag.line >= 0:
+                # line == -1 marks a pygments backfill, which has no usable location
+                self.refs[tag.name].append(tag)
+                file_refs.append(tag)
+
+        if file_refs:
+            self.refs_by_file[rel_fname] = sorted(file_refs, key=lambda tag: tag.line)
+
+        if scopes:
+            self.scopes[rel_fname] = sorted(scopes, key=lambda s: (s.start_line, -s.end_line))
+
+    def refs_in_range(self, rel_fname, start_line, end_line):
+        return [
+            tag
+            for tag in self.refs_by_file.get(rel_fname, [])
+            if start_line <= tag.line <= end_line
+        ]
+
+    def enclosing_scopes(self, rel_fname, line):
+        """Definitions containing `line`, outermost first."""
+        return [
+            scope
+            for scope in self.scopes.get(rel_fname, [])
+            if scope.start_line <= line <= scope.end_line
+        ]
+
+    def innermost_scope(self, rel_fname, line):
+        scopes = self.enclosing_scopes(rel_fname, line)
+        if scopes:
+            return scopes[-1]
+
+    def scope_for_def(self, tag):
+        """The Scope that a def Tag names."""
+        for scope in self.scopes.get(tag.rel_fname, []):
+            if scope.start_line == tag.line and scope.name == tag.name:
+                return scope
+
+        # Some languages capture the name on a different line than the definition
+        for scope in self.enclosing_scopes(tag.rel_fname, tag.line):
+            if scope.name == tag.name:
+                return scope
+
+    def qualified_name(self, scope):
+        """`Class.method` style name, built from enclosing definitions."""
+        parents = [
+            outer.name
+            for outer in self.enclosing_scopes(scope.rel_fname, scope.start_line)
+            if outer != scope and outer.end_line >= scope.end_line
+        ]
+        return ".".join(parents + [scope.name])
+
+    def def_names(self):
+        return sorted(self.defs.keys())
 
 
 def find_src_files(directory):
