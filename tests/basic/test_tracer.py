@@ -300,7 +300,7 @@ class TestRepoTracer(unittest.TestCase):
         small = self.tracer.trace(
             TraceRequest("handle_request", "both", 1, None, True),
             self.abs_fnames,
-            max_tokens=60,
+            max_tokens=220,
         )
         large = self.tracer.trace(
             TraceRequest("handle_request", "both", 1, None, True),
@@ -312,6 +312,34 @@ class TestRepoTracer(unittest.TestCase):
         # Even a tiny budget still names the symbol and where to look
         self.assertIn("handle_request", small)
         self.assertIn("Also used in:", small)
+
+    def test_trace_with_a_tiny_budget_still_says_where_the_symbol_is(self):
+        result = self.tracer.trace(
+            TraceRequest("handle_request", "both", 1, None, True),
+            self.abs_fnames,
+            max_tokens=60,
+        )
+
+        self.assertIn("handle_request", result)
+        self.assertIn("service.py", result)
+
+    def test_trace_never_exceeds_its_budget(self):
+        for symbol in ("handle_request", "payload", "normalize"):
+            for budget in (120, 400, 2048):
+                result = self.tracer.trace(
+                    TraceRequest(symbol, "both", 1, None, True),
+                    self.abs_fnames,
+                    max_tokens=budget,
+                )
+                self.assertLessEqual(
+                    self.repo_map.token_count(result),
+                    budget,
+                    f"{symbol} at budget {budget}",
+                )
+
+    def test_trace_always_tells_the_model_what_to_do_next(self):
+        result = self.trace("handle_request")
+        self.assertIn("add", result.lower())
 
     def test_trace_output_has_line_numbers(self):
         result = self.trace("handle_request", direction="up")

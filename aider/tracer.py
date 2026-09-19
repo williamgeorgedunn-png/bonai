@@ -83,6 +83,10 @@ MAX_LOIS_PER_SCOPE = 2
 MAX_CALLEES = 12
 MAX_SCAN_BYTES = 1_000_000
 
+# Variables aren't in the tags index, so they need a file scan. Cap it so a
+# big repo can't stall a turn: the most relevant files are scanned first.
+MAX_SCAN_FILES = 1200
+
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|spec)(/|$)|(^|/)(test_[^/]*|[^/]*_test|[^/]*\.test)\.")
 
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*(?P<info>[^\s`~]*)\s*(?P<rest>.*?)\s*$")
@@ -437,10 +441,41 @@ class RepoTracer:
 
         kind = self.symbol_kind(index, defs)
 
-        if kind == "callable":
-            return self.trace_callable(index, req, name, defs, chat_rel_fnames, max_tokens)
+        # Leave room for the footer, which must survive the clamp below: it is
+        # what tells the model what to do with the results.
+        footer_allowance = 40
 
-        return self.trace_data(index, req, name, defs, chat_rel_fnames, max_tokens)
+        if kind == "callable":
+            text, shown_files = self.trace_callable(
+                index, req, name, defs, chat_rel_fnames, max_tokens - footer_allowance
+            )
+        else:
+            text, shown_files = self.trace_data(
+                index, req, name, defs, chat_rel_fnames, max_tokens - footer_allowance
+            )
+
+        text = self.clamp(text, max_tokens - footer_allowance)
+
+        footer = self.render_footer(shown_files, chat_rel_fnames)
+        if footer:
+            text += "\n" + footer
+
+        return text
+
+    def clamp(self, text, max_tokens):
+        """Last line of defence: never return more than the caller asked for."""
+
+        if max_tokens <= 0 or self.token_count(text) <= max_tokens:
+            return text
+
+        lines = text.splitlines()
+        while lines and self.token_count("\n".join(lines)) > max_tokens:
+            lines = lines[: -max(1, len(lines) // 10)]
+
+        if not lines:
+            return text.splitlines()[0] if text.strip() else text
+
+        return "\n".join(lines) + "\n...(trimmed to fit the token budget)"
 
     ##
     # Callables
@@ -466,7 +501,7 @@ class RepoTracer:
         # Where it is defined. Callers are the point of the trace, so the
         # definitions never get more than a third of the budget.
         if def_scopes:
-            text = self.render_definitions(index, def_scopes, budget * 0.35)
+            text = self.render_definitions(index, def_scopes, budget * 0.25)
             budget -= self.token_count(text)
             sections.append(text)
 
@@ -495,14 +530,12 @@ class RepoTracer:
             budget -= self.token_count(text)
             sections.append(text)
 
-        footer = self.render_footer(callers_files | callee_files, chat_rel_fnames)
-        if footer:
-            sections.append(footer)
-
         if not defs:
             sections.append(self.suggest_similar(index, name))
 
-        return "\n".join(section for section in sections if section)
+        text = "\n".join(section for section in sections if section)
+
+        return text, callers_files | callee_files
 
     def find_callers(self, index, name, def_scopes, chat_rel_fnames):
         """Reference sites for `name`, excluding its own body (recursion)."""
@@ -613,17 +646,17 @@ class RepoTracer:
         attribute = self.looks_like_attribute(index, req, name, defs)
 
         scan_files = self.scan_files(index, req, name, defs)
-        hits, total, skipped_in_chat, file_counts = self.find_occurrences(
+        hits, total, skipped_in_chat, file_counts, truncated = self.find_occurrences(
             index, name, scan_files, chat_rel_fnames, attribute=attribute
         )
 
         if not hits and not total:
             lines = [f"\nNo uses of `{req.symbol}` found in the repo."]
             lines.append(self.suggest_similar(index, name))
-            return "\n".join(line for line in lines if line)
+            return "\n".join(line for line in lines if line), set()
 
         if len(file_counts) > MAX_FILES_BEFORE_AMBIGUOUS:
-            return self.render_ambiguous_files(req, name, total, file_counts)
+            return self.render_ambiguous_files(req, name, total, file_counts), set()
 
         kind_label = "attribute" if attribute else "variable"
         def_scopes = [index.scope_for_def(tag) for tag in defs]
@@ -642,20 +675,21 @@ class RepoTracer:
                 index,
                 writes,
                 len(writes),
-                max_tokens * (0.5 if req.direction == "both" else 1.0),
+                max_tokens * (0.4 if req.direction == "both" else 1.0),
                 title=f"Where `{name}` is set (assignments, parameters)",
                 empty=f"No assignments to `{name}` found.",
                 skipped_in_chat=skipped_in_chat if req.direction == "up" else 0,
             )
             shown_files |= files
             sections.append(text)
+            max_tokens -= self.token_count(text)
 
         if req.direction in ("down", "both"):
             text, files = self.render_hits(
                 index,
                 reads,
                 len(reads),
-                max_tokens * (0.5 if req.direction == "both" else 1.0),
+                max(max_tokens, 0) * (0.8 if req.direction == "both" else 1.0),
                 title=f"Where `{name}` is read",
                 empty=f"No reads of `{name}` found.",
                 skipped_in_chat=skipped_in_chat,
@@ -667,11 +701,13 @@ class RepoTracer:
         if flows:
             sections.append(flows)
 
-        footer = self.render_footer(shown_files, chat_rel_fnames)
-        if footer:
-            sections.append(footer)
+        if truncated:
+            sections.append(
+                f"\nI only searched the {MAX_SCAN_FILES} most relevant files, so there may be"
+                " more uses elsewhere."
+            )
 
-        return "\n".join(section for section in sections if section)
+        return "\n".join(section for section in sections if section), shown_files
 
     def looks_like_attribute(self, index, req, name, defs):
         raw = req.symbol.lower()
@@ -713,12 +749,17 @@ class RepoTracer:
         skipped_in_chat = 0
         file_counts = defaultdict(int)
 
+        rel_fnames = [
+            rel_fname
+            for rel_fname in rel_fnames
+            if index.abs_fnames.get(rel_fname) and filename_to_lang(index.abs_fnames[rel_fname])
+        ]
+        truncated = len(rel_fnames) > MAX_SCAN_FILES
+        if truncated:
+            rel_fnames = sorted(rel_fnames, key=self.file_sort_key)[:MAX_SCAN_FILES]
+
         for rel_fname in sorted(rel_fnames):
             abs_fname = index.abs_fnames.get(rel_fname)
-            if not abs_fname:
-                continue
-            if not filename_to_lang(abs_fname):
-                continue
 
             text = self.read_text(abs_fname)
             if not text or name not in text:
@@ -746,7 +787,7 @@ class RepoTracer:
                     scope_name = index.qualified_name(scope) if scope else ""
                     hits.append(Hit(rel_fname, lineno, kind, scope_name, note))
 
-        return hits, total, skipped_in_chat, file_counts
+        return hits, total, skipped_in_chat, file_counts, truncated
 
     def in_comment_or_string(self, line, col):
         """Cheap filter for matches inside a line comment."""
@@ -1058,6 +1099,13 @@ class RepoTracer:
 
             chunk = f"\n{rel_fname}:\n{body}"
             chunk_tokens = self.token_count(chunk)
+
+            # A single file's snippets must not blow the whole budget
+            while chunk_tokens > budget and len(lois) > 1:
+                lois = lois[: len(lois) // 2]
+                body = self.render_tree(abs_fname, rel_fname, lois)
+                chunk = f"\n{rel_fname}:\n{body}"
+                chunk_tokens = self.token_count(chunk)
 
             if parts and used + chunk_tokens > budget:
                 break

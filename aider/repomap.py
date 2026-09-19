@@ -285,11 +285,11 @@ class RepoMap:
 
         return data
 
-    def get_scopes(self, fname, rel_fname):
-        """Definition ranges for a file, in the same cache entry as its tags."""
+    def get_tags_and_scopes(self, fname, rel_fname):
+        """Tags and definition ranges, from a single cache lookup."""
 
         # Populate/refresh the cache entry
-        self.get_tags(fname, rel_fname)
+        tags = self.get_tags(fname, rel_fname)
 
         try:
             val = self.TAGS_CACHE.get(fname)
@@ -297,10 +297,15 @@ class RepoMap:
             self.tags_cache_error(e)
             val = self.TAGS_CACHE.get(fname)
 
-        if not val:
-            return []
+        scopes = val.get("scopes") if val else None
 
-        return val.get("scopes") or []
+        return tags or [], scopes or []
+
+    def get_scopes(self, fname, rel_fname):
+        """Definition ranges for a file, in the same cache entry as its tags."""
+
+        _tags, scopes = self.get_tags_and_scopes(fname, rel_fname)
+        return scopes
 
     def _run_captures(self, query: Query, node):
         # tree-sitter 0.23.2's python bindings had captures directly on the Query object
@@ -481,8 +486,7 @@ class RepoMap:
 
             rel_fname = self.get_rel_fname(fname)
             try:
-                tags = self.get_tags(fname, rel_fname) or []
-                scopes = self.get_scopes(fname, rel_fname)
+                tags, scopes = self.get_tags_and_scopes(fname, rel_fname)
             except Exception as err:
                 if self.verbose:
                     self.io.tool_warning(f"Unable to index {fname}: {err}")

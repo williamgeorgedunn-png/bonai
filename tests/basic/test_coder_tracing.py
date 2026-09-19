@@ -257,6 +257,32 @@ class TestCoderTracing(unittest.TestCase):
             self.assertEqual(coder.get_snippets_content(), "")
             self.assertEqual(coder.snippets, {})
 
+    def test_context_coder_answers_traces_without_dropping_files(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            io = InputOutput(yes=True)
+            coder = Coder.create(
+                self.GPT35, "context", io=io, use_git=True, fnames=["service.py"]
+            )
+
+            coder.partial_response_content = "```trace\nhandle_request\n```\n"
+            coder.reply_completed()
+
+            self.assertIn("Callers of", coder.reflected_message)
+            # The file set is untouched, the reply named no files
+            self.assertEqual(coder.get_inchat_relative_files(), ["service.py"])
+
+    def test_architect_coder_traces_before_calling_the_editor(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            io = InputOutput(yes=True)
+            coder = Coder.create(self.GPT35, "architect", io=io, use_git=True)
+
+            coder.partial_response_content = "```trace\nhandle_request\n```\n"
+            coder.reply_completed()
+
+            self.assertIn("Callers of", coder.reflected_message)
+
     def test_tracing_state_survives_a_mode_switch(self):
         with GitTemporaryDirectory():
             self.make_repo()

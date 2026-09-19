@@ -23,6 +23,13 @@ class ContextCoder(Coder):
         if not content or not content.strip():
             return True
 
+        # Answer traces before touching the file set: a reply that only asks
+        # for a trace mentions no files, and would otherwise drop them all
+        trace_message = self.get_trace_reply(content)
+        if trace_message and self.num_reflections < self.max_reflections - 1:
+            self.reflected_message = trace_message
+            return True
+
         # dump(repr(content))
         current_rel_fnames = set(self.get_inchat_relative_files())
         mentioned_rel_fnames = set(self.get_file_mentions(content, ignore_current=True))
