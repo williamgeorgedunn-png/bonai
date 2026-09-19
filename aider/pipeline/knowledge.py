@@ -89,7 +89,8 @@ class KnowledgeService:
             try:
                 fact = self.answer(need)
             except Exception as err:  # a bad lookup must not kill the run
-                fact = Fact(need, f"{need.kind} {need.target or need.symbol}", f"Lookup failed: {err}")
+                title = f"{need.kind} {need.target or need.symbol}"
+                fact = Fact(need, title, f"Lookup failed: {err}")
             if fact is None:
                 continue
             fact.tokens = self.token_count(fact.text)

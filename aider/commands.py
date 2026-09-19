@@ -1272,7 +1272,9 @@ class Commands:
         if sub == "edit":
             return coder.edit_ledger()
         if sub == "digest":
-            paths = rest.split() if rest else [self.coder.get_rel_fname(f) for f in coder.abs_fnames]
+            paths = rest.split()
+            if not paths:
+                paths = [coder.get_rel_fname(f) for f in coder.abs_fnames]
             if not paths:
                 self.io.tool_error("Name the files to digest, or /add them first.")
                 return

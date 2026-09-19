@@ -585,7 +585,9 @@ class PipelineCoder(Coder):
     def maybe_test(self, task):
         if not self.test_cmd:
             return
-        if task.kind != "test" and not self.auto_test:
+        # A task carrying test rounds came out of a triage, so re-run the tests
+        # it was meant to fix.
+        if task.kind != "test" and not self.auto_test and not task.test_rounds:
             return
 
         self.io.tool_output("Running tests ...")

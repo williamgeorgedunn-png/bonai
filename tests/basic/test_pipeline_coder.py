@@ -278,7 +278,7 @@ class TestPipelineRun(PipelineTestCase):
             coder = self.make_coder(
                 root,
                 io=io,
-                architect_replies=["I think we should probably refactor everything.", "Still prose."],
+                architect_replies=["We should refactor everything.", "Still prose."],
             )
             coder.run(with_message="do something", preproc=False)
 
@@ -524,6 +524,350 @@ class TestWorkerContextWipe(PipelineTestCase):
             pool = WorkerPool(coder, coder.worker_model, coder.config)
             self.assertEqual(pool.pick_format(str(small)), "pipeline-worker-whole")
             self.assertEqual(pool.pick_format(str(big)), "pipeline-worker-diff")
+
+
+TEST_PLAN_REPLY = """\
+Add the clamp and cover it with a test.
+
+```yaml
+plan_summary: |
+  Clamp the factor, then test it.
+tasks:
+  - id: T1
+    title: Clamp the factor in scale
+    file: calc.py
+    kind: edit
+    symbols: [scale]
+    depends_on: []
+  - id: T2
+    title: Test the clamp
+    file: test_calc.py
+    kind: test
+    depends_on: [T1]
+```
+"""
+
+TEST_FILE_EDIT = """\
+test_calc.py
+```
+from calc import scale
+
+
+def test_scale_clamps_negative_factor():
+    assert scale(5, -2) == 0
+```
+"""
+
+TRIAGE_REPLY = """\
+VERDICT: FIX_CODE
+NOTE: scale still multiplies by the negative factor
+The implementation never clamped the factor.
+
+```yaml
+tasks:
+  - id: T3
+    title: Really clamp the factor in scale
+    file: calc.py
+    kind: edit
+    depends_on: [T2]
+```
+
+# Task T3: Really clamp the factor in scale
+File to edit: calc.py   (this is the ONLY file you may change)
+
+## Changes
+- `scale(value, factor)`: clamp a negative factor to zero, for real this time.
+
+## Acceptance criteria
+- [ ] scale(5, -2) returns 0
+"""
+
+
+class FlakyTests:
+    """Fails until the clamp is present in the source."""
+
+    def __init__(self, source_path):
+        self.source_path = source_path
+        self.runs = 0
+
+    def __call__(self):
+        self.runs += 1
+        if "if factor < 0" in Path(self.source_path).read_text():
+            return ""
+        return (
+            "FAILED test_calc.py::test_scale_clamps_negative_factor\n"
+            "E   assert -10 == 0\n"
+            "1 failed, 0 passed in 0.1s\n"
+        )
+
+
+class TestPipelineTests(PipelineTestCase):
+    def test_failing_test_becomes_a_new_task_with_its_own_commit(self):
+        with GitTemporaryDirectory() as root:
+            calc = Path(root) / "calc.py"
+            calc.write_text(CALC_SOURCE)
+            repo = git.Repo(root)
+            repo.git.add("calc.py")
+            repo.git.commit("-m", "initial")
+
+            # A real but wrong edit: it changes the file without adding the clamp.
+            no_clamp = WORKER_EDIT.replace(
+                "    if factor < 0:\n        factor = 0\n",
+                "    # factor should be clamped here\n",
+            )
+            coder = self.make_coder(
+                root,
+                architect_replies=[
+                    TEST_PLAN_REPLY,
+                    BRIEF_REPLY,
+                    ACCEPT_REPLY,
+                    BRIEF_REPLY.replace("calc.py", "test_calc.py"),
+                    ACCEPT_REPLY,
+                    TRIAGE_REPLY,
+                    ACCEPT_REPLY,
+                ],
+                worker_replies=[no_clamp, TEST_FILE_EDIT, WORKER_EDIT],
+            )
+            coder.test_cmd = FlakyTests(calc)
+            coder.repo.get_commit_message = MagicMock(return_value="c")
+
+            coder.run(with_message="clamp the factor and test it", preproc=False)
+
+            self.assertIn("if factor < 0", calc.read_text())
+            self.assertTrue((Path(root) / "test_calc.py").exists())
+
+            fix_task = coder.ledger.get("T3")
+            self.assertIsNotNone(fix_task, "triage should insert a fix task")
+            self.assertEqual(fix_task.status, "accepted")
+            self.assertTrue(fix_task.commit)
+
+            # The original task keeps its own commit; nothing is amended
+            first = coder.ledger.get("T1")
+            self.assertEqual(first.status, "accepted")
+            self.assertNotEqual(first.commit, fix_task.commit)
+
+            commits = list(repo.iter_commits(repo.active_branch.name))
+            subjects = [c.message.splitlines()[0] for c in commits]
+            self.assertEqual(len(commits), 4, subjects)
+            self.assertEqual(coder.test_cmd.runs, 2)
+
+    def test_triage_escalation_stops_the_run(self):
+        with GitTemporaryDirectory() as root:
+            calc = Path(root) / "calc.py"
+            calc.write_text(CALC_SOURCE)
+            repo = git.Repo(root)
+            repo.git.add("calc.py")
+            repo.git.commit("-m", "initial")
+
+            coder = self.make_coder(
+                root,
+                architect_replies=[
+                    TEST_PLAN_REPLY,
+                    BRIEF_REPLY,
+                    ACCEPT_REPLY,
+                    BRIEF_REPLY.replace("calc.py", "test_calc.py"),
+                    ACCEPT_REPLY,
+                    "VERDICT: ESCALATE\nNOTE: a human should look at this",
+                ],
+                worker_replies=[
+                    WORKER_EDIT.replace("    if factor < 0:\n        factor = 0\n", ""),
+                    TEST_FILE_EDIT,
+                ],
+            )
+            coder.test_cmd = FlakyTests(calc)
+            coder.repo.get_commit_message = MagicMock(return_value="c")
+            coder.run(with_message="clamp and test", preproc=False)
+
+            self.assertTrue(coder.pipeline_stop)
+            self.assertIsNone(coder.ledger.get("T3"))
+
+    def test_tdd_ordering_runs_tests_first(self):
+        with GitTemporaryDirectory() as root:
+            calc = Path(root) / "calc.py"
+            calc.write_text(CALC_SOURCE)
+            repo = git.Repo(root)
+            repo.git.add("calc.py")
+            repo.git.commit("-m", "initial")
+
+            coder = self.make_coder(
+                root,
+                config=PipelineConfig(approve="never", tdd=True),
+                architect_replies=[
+                    TEST_PLAN_REPLY,
+                    BRIEF_REPLY.replace("calc.py", "test_calc.py"),
+                    ACCEPT_REPLY,
+                    BRIEF_REPLY,
+                    ACCEPT_REPLY,
+                ],
+                worker_replies=[TEST_FILE_EDIT, WORKER_EDIT],
+            )
+            coder.test_cmd = FlakyTests(calc)
+            coder.repo.get_commit_message = MagicMock(return_value="c")
+            coder.run(with_message="clamp and test", preproc=False)
+
+            order = [
+                entry["task"]
+                for entry in coder.ledger.history
+                if entry["step"] == "REVIEW" and "task" in entry
+            ]
+            self.assertEqual(order, ["T2", "T1"], "the test task should be reviewed first")
+            self.assertEqual(coder.ledger.get("T2").status, "accepted")
+            self.assertEqual(coder.ledger.get("T1").status, "accepted")
+            # A first failing run is expected under TDD, not a triage
+            self.assertIsNone(coder.ledger.get("T3"))
+
+
+class TestPipelineCommand(unittest.TestCase):
+    def make(self, edit_format="pipeline"):
+        coder = Coder.create(
+            main_model=Model("gpt-4o"),
+            edit_format=edit_format,
+            io=InputOutput(yes=True),
+            pipeline_worker_model=Model("gpt-4o-mini"),
+            pipeline_config=PipelineConfig(prewarm=False),
+        )
+        return coder, coder.commands
+
+    def test_subcommands_are_rejected_outside_pipeline_mode(self):
+        with GitTemporaryDirectory():
+            coder, commands = self.make(edit_format="diff")
+            coder.io.tool_error = MagicMock()
+            commands.cmd_pipeline("status")
+            self.assertIn("pipeline mode", str(coder.io.tool_error.call_args))
+
+    def test_status_without_a_run(self):
+        with GitTemporaryDirectory():
+            coder, commands = self.make()
+            coder.io.tool_output = MagicMock()
+            commands.cmd_pipeline("status")
+            self.assertIn("No pipeline run yet", str(coder.io.tool_output.call_args_list))
+
+    def test_skip_and_retry_change_task_status(self):
+        with GitTemporaryDirectory() as root:
+            coder, commands = self.make()
+            from aider.pipeline.ledger import Ledger
+
+            ledger = Ledger(Path(root) / ".aider.pipeline" / "ledger.yml", request="r")
+            ledger.set_tasks([{"id": "T1", "title": "one", "file": "a.py"}])
+            coder.setup_run(ledger)
+
+            commands.cmd_pipeline("skip T1")
+            self.assertEqual(ledger.get("T1").status, "skipped")
+
+            commands.cmd_pipeline("retry T1")
+            self.assertEqual(ledger.get("T1").status, "pending")
+
+    def test_skip_needs_a_task_id(self):
+        with GitTemporaryDirectory():
+            coder, commands = self.make()
+            coder.io.tool_error = MagicMock()
+            commands.cmd_pipeline("skip")
+            self.assertIn("task-id", str(coder.io.tool_error.call_args))
+
+    def test_abort_sets_the_stop_flag(self):
+        with GitTemporaryDirectory():
+            coder, commands = self.make()
+            commands.cmd_pipeline("abort")
+            self.assertTrue(coder.pipeline_stop)
+
+    def test_completions_list_subcommands(self):
+        with GitTemporaryDirectory():
+            _coder, commands = self.make()
+            self.assertIn("resume", commands.completions_pipeline())
+            self.assertIn("status", commands.completions_pipeline())
+
+    def test_pipeline_is_in_the_command_list(self):
+        with GitTemporaryDirectory():
+            _coder, commands = self.make()
+            self.assertIn("/pipeline", commands.get_commands())
+
+
+class TestPipelineSetupFromArgs(unittest.TestCase):
+    def parse(self, argv):
+        from aider.args import get_parser
+
+        return get_parser([], None).parse_args(argv)
+
+    def test_two_api_bases_are_applied_to_the_two_models(self):
+        from aider.main import setup_pipeline
+
+        args = self.parse(
+            [
+                "--pipeline",
+                "--pipeline-worker-model",
+                "openai/worker",
+                "--pipeline-architect-api-base",
+                "http://127.0.0.1:8081/v1",
+                "--pipeline-worker-api-base",
+                "http://127.0.0.1:8082/v1",
+                "--no-show-model-warnings",
+            ]
+        )
+        architect = Model("openai/architect")
+        config, worker = setup_pipeline(args, architect, InputOutput(yes=True))
+
+        self.assertIsNotNone(config)
+        self.assertEqual(architect.extra_params["api_base"], "http://127.0.0.1:8081/v1")
+        self.assertEqual(worker.extra_params["api_base"], "http://127.0.0.1:8082/v1")
+        self.assertEqual(worker.name, "openai/worker")
+
+    def test_worker_api_base_without_a_worker_model_warns(self):
+        from aider.main import setup_pipeline
+
+        args = self.parse(
+            ["--pipeline", "--pipeline-worker-api-base", "http://x", "--no-show-model-warnings"]
+        )
+        io = InputOutput(yes=True)
+        io.tool_warning = MagicMock()
+        config, worker = setup_pipeline(args, Model("gpt-4o"), io)
+        self.assertIsNotNone(config)
+        self.assertIsNone(worker)
+        self.assertIn("worker model", str(io.tool_warning.call_args))
+
+    def test_budget_flags_reach_the_config(self):
+        from aider.main import setup_pipeline
+
+        args = self.parse(
+            [
+                "--pipeline",
+                "--pipeline-working-memory-tokens",
+                "512",
+                "--pipeline-max-tasks",
+                "4",
+                "--pipeline-approve",
+                "never",
+                "--no-show-model-warnings",
+            ]
+        )
+        config, _worker = setup_pipeline(args, Model("gpt-4o"), InputOutput(yes=True))
+        self.assertEqual(config.working_memory_tokens, 512)
+        self.assertEqual(config.max_tasks, 4)
+        self.assertEqual(config.approve, "never")
+
+    def test_editor_model_is_used_as_the_worker(self):
+        from aider.main import setup_pipeline
+
+        args = self.parse(["--pipeline", "--no-show-model-warnings"])
+        architect = Model("gpt-4o", editor_model="gpt-4o-mini")
+        _config, worker = setup_pipeline(args, architect, InputOutput(yes=True))
+        self.assertEqual(worker.name, "gpt-4o-mini")
+
+    def test_architect_model_flag_overrides_the_main_model(self):
+        args = self.parse(
+            ["--pipeline", "--pipeline-architect-model", "gpt-4o", "--no-show-model-warnings"]
+        )
+        self.assertEqual(args.pipeline_architect_model, "gpt-4o")
+        self.assertEqual(args.edit_format, "pipeline")
+
+    def test_an_invalid_budget_is_refused(self):
+        from aider.main import setup_pipeline
+
+        args = self.parse(["--pipeline", "--pipeline-max-tasks=-2"])
+        io = InputOutput(yes=True)
+        io.tool_error = MagicMock()
+        config, _worker = setup_pipeline(args, Model("gpt-4o"), io)
+        self.assertIsNone(config)
+        io.tool_error.assert_called()
 
 
 class TestPipelineOffByDefault(unittest.TestCase):

@@ -127,7 +127,8 @@ class TestParsing(unittest.TestCase):
         self.assertIsNone(data.get("tasks") if isinstance(data, dict) else None)
 
     def test_find_verdict_fallback(self):
-        self.assertEqual(parsing.find_verdict("I think we retry this", ("ACCEPT", "RETRY")), "RETRY")
+        found = parsing.find_verdict("I think we retry this", ("ACCEPT", "RETRY"))
+        self.assertEqual(found, "RETRY")
 
     def test_parse_compact(self):
         keep, drop, rewrites = parsing.parse_compact(
