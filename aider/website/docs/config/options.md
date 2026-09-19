@@ -63,7 +63,8 @@ usage: aider [-h] [--model] [--openai-api-key] [--anthropic-api-key]
              [--trace-tokens] [--input-history-file]
              [--chat-history-file]
              [--restore-chat-history | --no-restore-chat-history]
-             [--llm-history-file] [--dark-mode] [--light-mode]
+             [--llm-history-file] [--llm-log | --no-llm-log]
+             [--llm-log-file] [--dark-mode] [--light-mode]
              [--pretty | --no-pretty] [--stream | --no-stream]
              [--user-input-color] [--tool-output-color]
              [--tool-error-color] [--tool-warning-color]
@@ -449,6 +450,18 @@ Aliases:
 ### `--llm-history-file LLM_HISTORY_FILE`
 Log the conversation with the LLM to this file (for example, .aider.llm.history)  
 Environment variable: `AIDER_LLM_HISTORY_FILE`  
+
+### `--llm-log`
+Log LLM limitations (malformed edits, failed traces, blown context) to a local file, for later prompt work (default: True)  
+Default: True  
+Environment variable: `AIDER_LLM_LOG`  
+Aliases:
+  - `--llm-log`
+  - `--no-llm-log`
+
+### `--llm-log-file LLM_LOG_FILE`
+File for the limitation log (default: .aider.llm-limitations.jsonl)  
+Environment variable: `AIDER_LLM_LOG_FILE`  
 
 ## Output settings:
 

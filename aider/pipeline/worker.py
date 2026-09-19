@@ -85,6 +85,7 @@ class WorkerPool:
             auto_trace=False,
             total_cost=0.0,
             summarizer=summarizer,
+            llm_log=False,
         )
         coder.max_reflections = 1
         self.coders[edit_format] = coder

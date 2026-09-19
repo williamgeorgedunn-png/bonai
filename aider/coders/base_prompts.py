@@ -66,7 +66,8 @@ get_factorial
 Buzzer.buzz_buzz up
 ```
 
-Add `up` after a name for only the callers, or `down` for only what it uses.
+Add `up` after a name for only the callers, `down` for only what it uses,
+or `tests` for the tests that exercise it.
 This works for functions, classes, methods, and also for variables and attributes.
 
 Rules for tracing:

@@ -34,6 +34,7 @@ from aider.commands import Commands
 from aider.exceptions import LiteLLMExceptions
 from aider.history import ChatSummary
 from aider.io import ConfirmGroup, InputOutput
+from aider.limitation_log import LimitationLog, excerpt
 from aider.linter import Linter
 from aider.llm import litellm
 from aider.models import RETRY_TIMEOUT
@@ -106,6 +107,9 @@ class Coder:
     trace_tokens = 1024
     focus_idents = None
     snippets = None
+    file_reasons = None
+    pending_file_reasons = None
+    limitation_log = None
     trace_contents = None
     pending_trace_contents = None
     traced_this_turn = None
@@ -197,6 +201,11 @@ class Coder:
                 file_watcher=from_coder.file_watcher,
                 focus_idents=from_coder.focus_idents,
                 snippets=from_coder.snippets,
+                file_reasons=from_coder.file_reasons,
+                pending_file_reasons=from_coder.pending_file_reasons,
+                limitation_log=from_coder.limitation_log,
+                pipeline_config=from_coder.pipeline_config,
+                pipeline_worker_model=from_coder.pipeline_worker_model,
             )
             use_kwargs.update(update)  # override to complete the switch
             use_kwargs.update(kwargs)  # override passed kwargs
@@ -299,6 +308,9 @@ class Coder:
             auto = "auto" if self.auto_trace else "on request"
             lines.append(f"Code tracing: {self.trace_tokens} tokens, {auto}")
 
+        if self.limitation_log and self.limitation_log.enabled:
+            lines.append(f"LLM limitation log: {self.limitation_log.path}")
+
         # Files
         for fname in self.get_inchat_relative_files():
             lines.append(f"Added {fname} to the chat.")
@@ -366,6 +378,11 @@ class Coder:
         snippets=None,
         pipeline_config=None,
         pipeline_worker_model=None,
+        file_reasons=None,
+        pending_file_reasons=None,
+        limitation_log=None,
+        llm_log=True,
+        llm_log_file=None,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -392,6 +409,8 @@ class Coder:
 
         self.focus_idents = set(focus_idents) if focus_idents else set()
         self.snippets = dict(snippets) if snippets else dict()
+        self.file_reasons = dict(file_reasons) if file_reasons else dict()
+        self.pending_file_reasons = dict(pending_file_reasons) if pending_file_reasons else dict()
         self.traced_this_turn = set()
         self.trace_contents = set()
         self.pending_trace_contents = set()
@@ -562,6 +581,24 @@ class Coder:
                 max_tokens=self.trace_tokens,
                 verbose=self.verbose,
             )
+
+        if limitation_log is not None:
+            self.limitation_log = limitation_log
+        else:
+            log_path = llm_log_file
+            if llm_log and not log_path:
+                log_path = Path(self.root) / ".aider.llm-limitations.jsonl"
+            self.limitation_log = LimitationLog(
+                path=log_path,
+                io=io,
+                enabled=llm_log,
+            )
+
+        # Stamp the current coder, including when the log is shared across a
+        # mode switch: otherwise entries keep the originating edit_format
+        if self.limitation_log:
+            self.limitation_log.model = getattr(self.main_model, "name", None)
+            self.limitation_log.edit_format = self.edit_format
 
         self.summarizer = summarizer or ChatSummary(
             [self.main_model.weak_model, self.main_model],
@@ -869,9 +906,50 @@ class Coder:
             self.get_rel_fname(fname) for fname in self.abs_read_only_fnames
         )
 
-    def get_symbol_index(self):
-        """The tracer's symbol index, with a spinner: the first build is slow."""
+    def log_limitation(self, kind, **fields):
+        """Record one recoverable LLM failure, never letting logging break the chat."""
 
+        log = self.limitation_log
+        if not log:
+            return
+        try:
+            log.record(kind, **fields)
+        except Exception:
+            pass
+
+    def remember_file_reasons(self, reasons_by_file):
+        """Keep the latest 'why this file' notes from a trace.
+
+        Written to both the live map (for this turn) and a pending map that
+        survives the next `init_before_message`, then expires.
+        """
+
+        self._merge_file_reasons(self.file_reasons, reasons_by_file)
+        self._merge_file_reasons(self.pending_file_reasons, reasons_by_file)
+
+    def _merge_file_reasons(self, store, reasons_by_file):
+        if not reasons_by_file:
+            return
+
+        for rel_fname, reasons in reasons_by_file.items():
+            existing = store.setdefault(rel_fname, [])
+            for reason in reasons:
+                if reason in existing:
+                    existing.remove(reason)
+                existing.insert(0, reason)
+            store[rel_fname] = existing[:3]
+
+    def file_reason_text(self, rel_fname):
+        reasons = (self.file_reasons or {}).get(rel_fname) or []
+        return "; ".join(reasons[:2])
+
+    def file_reason_subject(self, rel_fname):
+        reason = self.file_reason_text(rel_fname)
+        if not reason:
+            return rel_fname
+        return f"{rel_fname}\n  {reason}"
+
+    def get_symbol_index(self):
         spin = Spinner("Indexing symbols")
         try:
             return self.tracer.get_index(self.get_all_abs_files(), progress=spin.step)
@@ -885,12 +963,14 @@ class Coder:
             return
 
         try:
-            return self.tracer.trace(
+            result = self.tracer.trace(
                 req,
                 self.get_all_abs_files(),
                 chat_rel_fnames=self.get_chat_rel_fnames(),
                 max_tokens=max_tokens,
             )
+            self.remember_file_reasons(self.tracer.last_file_reasons)
+            return result
         except Exception as err:
             self.io.tool_warning(f"Unable to trace {req.symbol}: {err}")
             if self.verbose:
@@ -1002,6 +1082,25 @@ class Coder:
 
         return self.auto_trace_cache[2]
 
+    def honoured_trace_requests(self, content):
+        """Trace requests we would actually run, not loose prose that we drop."""
+
+        if not self.tracer or not content:
+            return []
+
+        requests = parse_trace_requests(content)
+        if not requests:
+            return []
+
+        try:
+            index = self.get_symbol_index()
+        except Exception:
+            return []
+
+        return [
+            req for req in requests if req.strict or req.symbol.rpartition(".")[2] in index.defs
+        ]
+
     def get_trace_reply(self, content):
         """Answer any trace requests in an LLM reply.
 
@@ -1013,25 +1112,30 @@ class Coder:
         if not self.tracer or not content:
             return
 
-        requests = parse_trace_requests(content)
-        if not requests:
-            return
+        log = self.limitation_log
+        if log and log.looks_like_tool_xml(content):
+            self.log_limitation("trace.tool_xml", excerpt=excerpt(content))
 
-        try:
-            index = self.get_symbol_index()
-        except Exception as err:
-            self.io.tool_warning(f"Unable to index the repo for tracing: {err}")
-            return
-
-        # Prose like "let me trace through the logic" is not a request
-        requests = [
-            req for req in requests if req.strict or req.symbol.rpartition(".")[2] in index.defs
-        ]
+        parsed = parse_trace_requests(content)
+        requests = self.honoured_trace_requests(content)
         if not requests:
+            if parsed:
+                for req in parsed:
+                    self.log_limitation(
+                        "trace.loose_ignored",
+                        symbol=req.symbol,
+                        excerpt=excerpt(content),
+                    )
+            elif log and log.looks_like_trace_attempt(content):
+                self.log_limitation("trace.unparsed", excerpt=excerpt(content))
             return
 
         if self.num_trace_rounds >= self.max_trace_rounds:
             self.io.tool_warning("Ignoring trace request, already traced twice for this message.")
+            self.log_limitation(
+                "trace.budget_exhausted",
+                symbols=[req.symbol for req in requests],
+            )
             return self.gpt_prompts.trace_budget_exhausted
 
         self.num_trace_rounds += 1
@@ -1044,6 +1148,7 @@ class Coder:
         for req in requests:
             key = (req.symbol.lower(), req.direction, req.file)
             if key in self.traced_this_turn or key in auto_traced:
+                self.log_limitation("trace.repeated", symbol=req.symbol)
                 results.append(
                     f"\nI already traced `{req.symbol}` above, see those results."
                     " Tell me which files you need added to the chat."
@@ -1054,6 +1159,9 @@ class Coder:
             self.io.tool_output(f"Tracing {req.symbol}...")
 
             result = self.run_trace(req, max_tokens=budget)
+            status = getattr(self.tracer, "last_status", "ok")
+            if status != "ok":
+                self.log_limitation(f"trace.{status}", symbol=req.symbol, direction=req.direction)
             if result:
                 results.append(result)
 
@@ -1223,6 +1331,10 @@ class Coder:
         # this turn in the context and expire with everything else next turn
         self.trace_contents = set(self.pending_trace_contents or ())
         self.pending_trace_contents = set()
+        # File reasons last one extra message, then drop so they cannot
+        # label an unrelated later mention
+        self.file_reasons = dict(self.pending_file_reasons or {})
+        self.pending_file_reasons = {}
         self.auto_trace_cache = None
 
         if self.repo:
@@ -1859,6 +1971,10 @@ class Coder:
                     if not should_retry:
                         self.mdstream = None
                         self.check_and_open_urls(err, ex_info.description)
+                        if ex_info.name != "ContextWindowExceededError":
+                            self.log_limitation(
+                                "llm.error", name=ex_info.name, excerpt=excerpt(err)
+                            )
                         break
 
                     err_msg = str(err)
@@ -1990,6 +2106,9 @@ class Coder:
             self.auto_commit(edited, context="Ran the linter")
             self.lint_outcome = not lint_errors
             if lint_errors:
+                self.log_limitation(
+                    "lint.failed", files=sorted(edited), excerpt=excerpt(lint_errors)
+                )
                 ok = self.io.confirm_ask("Attempt to fix lint errors?")
                 if ok:
                     self.reflected_message = self.with_trace_reply(lint_errors, content)
@@ -2006,6 +2125,7 @@ class Coder:
             test_errors = self.commands.cmd_test(self.test_cmd)
             self.test_outcome = not test_errors
             if test_errors:
+                self.log_limitation("test.failed", excerpt=excerpt(test_errors))
                 ok = self.io.confirm_ask("Attempt to fix test errors?")
                 if ok:
                     self.reflected_message = self.with_trace_reply(test_errors, content)
@@ -2013,6 +2133,12 @@ class Coder:
 
         # Traces are answered last, so a reply that both edits and traces still
         # gets its edits applied, linted and tested
+        if edited and self.honoured_trace_requests(content):
+            self.log_limitation(
+                "trace.with_edits",
+                files=sorted(edited),
+                excerpt=excerpt(content),
+            )
         trace_message = self.get_trace_reply(content)
         if trace_message:
             self.reflected_message = trace_message
@@ -2021,6 +2147,8 @@ class Coder:
         pass
 
     def show_exhausted_error(self):
+        self.log_limitation("context.exhausted")
+
         output_tokens = 0
         if self.partial_response_content:
             output_tokens = self.main_model.token_count(self.partial_response_content)
@@ -2164,16 +2292,26 @@ class Coder:
         added_fnames = []
         group = ConfirmGroup(new_mentions)
         for rel_fname in sorted(new_mentions):
+            reason = self.file_reason_text(rel_fname)
             if self.io.confirm_ask(
-                "Add file to the chat?", subject=rel_fname, group=group, allow_never=True
+                "Add file to the chat?",
+                subject=self.file_reason_subject(rel_fname),
+                group=group,
+                allow_never=True,
             ):
                 self.add_rel_fname(rel_fname)
                 added_fnames.append(rel_fname)
+                self.log_limitation("file.accepted", file=rel_fname, reason=reason or None)
             else:
                 self.ignore_mentions.add(rel_fname)
+                self.log_limitation("file.declined", file=rel_fname, reason=reason or None)
 
         if added_fnames:
-            return prompts.added_files.format(fnames=", ".join(added_fnames))
+            labelled = []
+            for rel_fname in added_fnames:
+                reason = self.file_reason_text(rel_fname)
+                labelled.append(f"{rel_fname} ({reason})" if reason else rel_fname)
+            return prompts.added_files.format(fnames=", ".join(labelled))
 
     def send(self, messages, model=None, functions=None):
         self.got_reasoning_content = False
@@ -2210,6 +2348,7 @@ class Coder:
             if ex_info.name == "ContextWindowExceededError":
                 # Still calculate costs for context window errors
                 self.calculate_and_show_tokens_and_cost(messages, completion)
+                self.log_limitation("context.exceeded", excerpt=excerpt(err))
             raise
         except KeyboardInterrupt as kbi:
             self.keyboard_interrupt()
@@ -2706,6 +2845,8 @@ class Coder:
             self.io.tool_output(urls.edit_errors)
             self.io.tool_output()
             self.io.tool_output(str(err))
+
+            self.log_limitation("edit.malformed", excerpt=excerpt(err))
 
             self.reflected_message = str(err)
             return edited

@@ -39,6 +39,9 @@ cog.out(text)
   - New `/trace` command, plus `--trace`, `--auto-trace` and `--trace-tokens` settings.
 - Added `/focus` and `/unfocus` to keep the repo map centered on chosen symbols across turns.
 - Added `/snip` and `/unsnip` to put a single function or class in the chat as a read-only snippet, instead of its whole file.
+- File-add prompts now say why the file was suggested, using the last trace (for example `api.py` / `calls handle_request from post`).
+- Added `/tests` (and `trace foo tests`) to find the tests that exercise a symbol and add them as snippets.
+- Logging of LLM limitations (malformed edits, failed traces, blown context) to `.aider.llm-limitations.jsonl` in the project root, created by default. Disable with `--no-llm-log`.
 - Fixed the repo map capturing the last node of every tags query twice.
 
 - Expanded `ANTHROPIC_MODELS` list with Claude Opus 4.1/4.5/4.6/4.7 dated variants and Claude Sonnet 3.7 so the Anthropic API key auto-detection (`models.sanity_check_models`) recognises them.

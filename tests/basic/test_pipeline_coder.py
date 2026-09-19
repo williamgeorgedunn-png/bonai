@@ -459,6 +459,8 @@ class TestWorkerContextWipe(PipelineTestCase):
             worker.traced_this_turn = {"foo"}
             worker.auto_trace_cache = object()
             worker.num_trace_rounds = 2
+            worker.file_reasons = {"stale.py": ["old reason"]}
+            worker.pending_file_reasons = {"stale.py": ["pending"]}
 
             pool.reset(worker, ["/tmp/fresh.py"])
 
@@ -474,6 +476,8 @@ class TestWorkerContextWipe(PipelineTestCase):
             self.assertEqual(worker.traced_this_turn, set())
             self.assertIsNone(worker.auto_trace_cache)
             self.assertEqual(worker.num_trace_rounds, 0)
+            self.assertEqual(worker.file_reasons, {})
+            self.assertEqual(worker.pending_file_reasons, {})
 
     def test_worker_system_prompt_is_identical_between_tasks(self):
         """A stable prefix is what lets a local server reuse its KV cache."""

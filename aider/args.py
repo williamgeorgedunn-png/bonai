@@ -435,6 +435,26 @@ def get_parser(default_config_files, git_root):
         default=None,
         help="Log the conversation with the LLM to this file (for example, .aider.llm.history)",
     ).complete = shtab.FILE
+    default_llm_log_file = (
+        os.path.join(git_root, ".aider.llm-limitations.jsonl")
+        if git_root
+        else ".aider.llm-limitations.jsonl"
+    )
+    group.add_argument(
+        "--llm-log",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Log LLM limitations (malformed edits, failed traces, blown context) to a local file, "
+            "for later prompt work (default: True)"
+        ),
+    )
+    group.add_argument(
+        "--llm-log-file",
+        metavar="LLM_LOG_FILE",
+        default=None,
+        help=f"File for the limitation log (default: {default_llm_log_file})",
+    ).complete = shtab.FILE
 
     ##########
     group = parser.add_argument_group("Output settings")

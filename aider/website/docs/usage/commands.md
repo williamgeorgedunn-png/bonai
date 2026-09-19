@@ -61,6 +61,7 @@ cog.out(get_help_md())
 | **/settings** | Print out the current settings |
 | **/snip** | Add just one function/class to the chat as a read-only snippet, not the whole file |
 | **/test** | Run a shell command and add the output to the chat on non-zero exit code |
+| **/tests** | Show the tests that exercise a symbol, and offer to add them as snippets |
 | **/think-tokens** | Set the thinking token budget, eg: 8096, 8k, 10.5k, 0.5M, or 0 to disable. |
 | **/tokens** | Report on the number of tokens used by the current chat context |
 | **/trace** | Show where a symbol is defined, called, read and written |

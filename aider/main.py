@@ -1075,6 +1075,8 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             trace_tokens=args.trace_tokens,
             pipeline_config=pipeline_config,
             pipeline_worker_model=pipeline_worker_model,
+            llm_log=args.llm_log,
+            llm_log_file=args.llm_log_file,
         )
     except UnknownEditFormat as err:
         io.tool_error(str(err))
