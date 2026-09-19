@@ -17,10 +17,10 @@ from difflib import get_close_matches
 
 from grep_ast import TreeContext, filename_to_lang
 
-from aider.repomap import Scope
-
 # tree_sitter is throwing a FutureWarning
 from grep_ast.tsl import get_parser  # noqa: E402
+
+from aider.repomap import Scope
 
 # A single located usage of a symbol
 Hit = namedtuple("Hit", "rel_fname line kind scope_name note")
@@ -346,7 +346,7 @@ class RepoTracer:
         return text
 
     def get_tree(self, abs_fname):
-        """(lang, tree) for a file, cached by mtime. None when unparseable."""
+        """(lang, tree) for a file, cached by mtime. None when unparsable."""
 
         try:
             mtime = os.path.getmtime(abs_fname)
@@ -416,6 +416,12 @@ class RepoTracer:
         return name, container, defs
 
     def symbol_kind(self, index, defs):
+        """ "callable", "data" or "unknown", deciding how to trace the symbol.
+
+        Variables usually aren't captured by the tags queries at all, so an
+        unresolved name is traced as data rather than reported as missing.
+        """
+
         kinds = set()
         for tag in defs:
             scope = index.scope_for_def(tag)
@@ -492,6 +498,12 @@ class RepoTracer:
     ##
 
     def trace_callable(self, index, req, name, defs, chat_rel_fnames, max_tokens):
+        """Trace a function/class: where it lives, who calls it, what it uses.
+
+        Returns (text, files mentioned in the text), leaving the footer and the
+        final budget clamp to trace().
+        """
+
         def_scopes = []
         for tag in defs:
             scope = index.scope_for_def(tag)
@@ -603,9 +615,7 @@ class RepoTracer:
                 # Prefer a definition in the same file, then by file rank
                 targets = sorted(
                     targets,
-                    key=lambda target: (
-                        target.rel_fname != scope.rel_fname,
-                    )
+                    key=lambda target: (target.rel_fname != scope.rel_fname,)
                     + self.file_sort_key(target.rel_fname),
                 )
                 callees[tag.name] = targets
@@ -653,6 +663,11 @@ class RepoTracer:
     ##
 
     def trace_data(self, index, req, name, defs, chat_rel_fnames, max_tokens):
+        """Trace a variable/attribute: where it is set, read, and where it flows.
+
+        Returns (text, files mentioned in the text), like trace_callable().
+        """
+
         attribute = self.looks_like_attribute(index, req, name, defs)
 
         scan_files = self.scan_files(index, req, name, defs)
@@ -790,9 +805,7 @@ class RepoTracer:
                         skipped_in_chat += 1
                         continue
 
-                    kind, note = self.classify(
-                        index, lang, tree, lineno, match.start(), name, line
-                    )
+                    kind, note = self.classify(index, lang, tree, lineno, match.start(), name, line)
                     scope = index.innermost_scope(rel_fname, lineno)
                     scope_name = index.qualified_name(scope) if scope else ""
                     hits.append(Hit(rel_fname, lineno, kind, scope_name, note))
@@ -839,6 +852,8 @@ class RepoTracer:
         return "read"
 
     def field_contains(self, parent, field, node):
+        """Is `node` inside `parent`'s named field, eg the left of an assignment?"""
+
         try:
             target = parent.child_by_field_name(field)
         except Exception:
@@ -854,6 +869,8 @@ class RepoTracer:
         return False
 
     def classify_python(self, index, node, name):
+        """(kind, flow note) for one python occurrence, from its parent node."""
+
         current = node
         # Step out of attribute/subscript wrappers so `self.x = 1` counts as a write
         while current.parent is not None and current.parent.type in (
@@ -881,8 +898,13 @@ class RepoTracer:
                 return "write", ""
             return "read", ""
 
-        if ptype in ("parameters", "lambda_parameters", "default_parameter", "typed_parameter",
-                     "typed_default_parameter"):
+        if ptype in (
+            "parameters",
+            "lambda_parameters",
+            "default_parameter",
+            "typed_parameter",
+            "typed_default_parameter",
+        ):
             return "param", ""
 
         if ptype in ("for_statement", "for_in_clause"):
@@ -908,6 +930,8 @@ class RepoTracer:
         return "read", self.argument_note(index, parent, current)
 
     def classify_js(self, index, node, name):
+        """(kind, flow note) for one javascript/typescript occurrence."""
+
         current = node
         while current.parent is not None and current.parent.type in (
             "member_expression",

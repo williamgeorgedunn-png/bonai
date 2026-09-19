@@ -207,9 +207,7 @@ class TestRepoTracer(unittest.TestCase):
         self.temp_dir_obj.cleanup()
 
     def trace(self, symbol, direction="both", file=None, chat_rel_fnames=()):
-        req = TraceRequest(
-            symbol=symbol, direction=direction, depth=1, file=file, strict=True
-        )
+        req = TraceRequest(symbol=symbol, direction=direction, depth=1, file=file, strict=True)
         return self.tracer.trace(req, self.abs_fnames, chat_rel_fnames=chat_rel_fnames)
 
     def test_index_finds_definitions_and_scopes(self):

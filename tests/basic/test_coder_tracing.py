@@ -111,9 +111,7 @@ class TestCoderTracing(unittest.TestCase):
 
             self.reply_with(coder, "I need context first.\n\n```trace\nhandle_request\n```\n")
 
-            history = "\n".join(
-                msg["content"] for msg in coder.cur_messages + coder.done_messages
-            )
+            history = "\n".join(msg["content"] for msg in coder.cur_messages + coder.done_messages)
             self.assertIn("api.py", history)
             self.assertIn("handle_request", history)
 
@@ -307,9 +305,7 @@ class TestCoderTracing(unittest.TestCase):
         with GitTemporaryDirectory():
             self.make_repo()
             io = InputOutput(yes=True)
-            coder = Coder.create(
-                self.GPT35, "context", io=io, use_git=True, fnames=["service.py"]
-            )
+            coder = Coder.create(self.GPT35, "context", io=io, use_git=True, fnames=["service.py"])
 
             coder.partial_response_content = "```trace\nhandle_request\n```\n"
             coder.reply_completed()

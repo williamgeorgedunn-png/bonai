@@ -966,7 +966,7 @@ class Coder:
     def get_trace_reply(self, content):
         """Answer any trace requests in an LLM reply.
 
-        Returns text to reflect back to the model, or None. Unparseable,
+        Returns text to reflect back to the model, or None. Unparsable,
         unknown or repeated requests all produce something actionable rather
         than silence, since a small model can't recover from silence.
         """
@@ -986,9 +986,7 @@ class Coder:
 
         # Prose like "let me trace through the logic" is not a request
         requests = [
-            req
-            for req in requests
-            if req.strict or req.symbol.rpartition(".")[2] in index.defs
+            req for req in requests if req.strict or req.symbol.rpartition(".")[2] in index.defs
         ]
         if not requests:
             return

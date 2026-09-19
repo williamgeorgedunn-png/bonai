@@ -269,10 +269,7 @@ def get_parser(default_config_files, git_root):
         "--trace",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "Enable /trace and let the LLM ask where symbols are defined and used"
-            " (default: True)"
-        ),
+        help="Enable /trace and let the LLM ask where symbols are defined and used (default: True)",
     )
     group.add_argument(
         "--auto-trace",
