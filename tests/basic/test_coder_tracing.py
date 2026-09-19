@@ -37,6 +37,21 @@ def post(raw_value):
     return handle_request(raw_value)
 """
 
+EDIT_AND_TRACE = """\
+Here is the change, and I need to see the callers too.
+
+service.py
+<<<<<<< SEARCH
+    return raw_value.strip()
+=======
+    return raw_value.strip().lower()
+>>>>>>> REPLACE
+
+```trace
+handle_request
+```
+"""
+
 
 class TestCoderTracing(unittest.TestCase):
     def setUp(self):
@@ -146,6 +161,59 @@ class TestCoderTracing(unittest.TestCase):
             self.assertNotIn("Callers of", current)
             self.assertIn("results omitted", current)
 
+    def history(self, coder):
+        return "\n".join(
+            msg["content"]
+            for msg in coder.done_messages + coder.cur_messages
+            if isinstance(msg["content"], str)
+        )
+
+    def test_edits_are_still_linted_when_the_reply_also_traces(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024, fnames=["service.py"], auto_lint=True)
+
+            linted = []
+            coder.lint_edited = lambda fnames: linted.append(set(fnames))
+
+            self.reply_with(coder, EDIT_AND_TRACE)
+
+            self.assertEqual(linted, [{"service.py"}])
+            self.assertIn("lower()", Path("service.py").read_text())
+            self.assertIn("Callers of", self.history(coder))
+
+    def test_lint_errors_and_trace_results_are_sent_together(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024, fnames=["service.py"], auto_lint=True)
+            coder.lint_edited = lambda fnames: "service.py:1 is not to my taste"
+
+            self.reply_with(coder, EDIT_AND_TRACE)
+
+            history = self.history(coder)
+            self.assertIn("not to my taste", history)
+            self.assertIn("Callers of", history)
+
+    def test_shell_commands_run_when_the_reply_also_traces(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024, fnames=["service.py"])
+
+            events = []
+            answer_trace = coder.get_trace_reply
+
+            coder.run_shell_commands = lambda: events.append("shell") or ""
+            coder.get_trace_reply = lambda content: (
+                events.append("trace"),
+                answer_trace(content),
+            )[1]
+
+            self.reply_with(coder, EDIT_AND_TRACE)
+
+            # The reply's own shell commands run before the trace sends it back
+            self.assertEqual(events[:2], ["shell", "trace"])
+            self.assertIn("Callers of", self.history(coder))
+
     def test_trace_rounds_are_capped(self):
         with GitTemporaryDirectory():
             self.make_repo()
@@ -248,6 +316,48 @@ class TestCoderTracing(unittest.TestCase):
             idents = coder.get_traceable_idents("rework handle_request please")
             self.assertNotIn("handle_request", idents)
 
+    def test_auto_traced_symbol_is_not_traced_again_on_request(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.cur_messages = [dict(role="user", content="rework handle_request please")]
+            chunks = coder.format_chat_chunks()
+            self.assertIn("handle_request", chunks.trace[0]["content"])
+
+            reply = coder.get_trace_reply("```trace\nhandle_request\n```\n")
+            self.assertIn("already traced", reply)
+
+    def test_slash_trace_results_last_exactly_one_message(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.commands.cmd_trace("handle_request")
+            self.assertIn("Callers of", self.history(coder))
+
+            # The model has to see them once before they are stubbed out
+            self.reply_with(coder, "ok")
+            self.assertIn("Callers of", self.history(coder))
+
+            self.reply_with(coder, "ok")
+            history = self.history(coder)
+            self.assertNotIn("Callers of", history)
+            self.assertIn("results omitted", history)
+
+    def test_trace_instructions_teach_the_backtick_fence(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            # A chat file full of backticks makes aider pick another fence, but
+            # the trace block still has to be one the parser understands
+            coder.fence = ("<source>", "</source>")
+            instructions = coder.fmt_system_prompt(coder.gpt_prompts.trace_instructions)
+
+            self.assertIn("```trace", instructions)
+            self.assertNotIn("<source>trace", instructions)
+
     def test_focus_idents_reach_the_repo_map(self):
         with GitTemporaryDirectory():
             self.make_repo()
@@ -289,6 +399,25 @@ class TestCoderTracing(unittest.TestCase):
 
             content = coder.get_snippets_content()
             self.assertIn("return None", content)
+
+    def test_snippets_are_not_sent_when_the_whole_file_is_in_the_chat(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024, fnames=["storage.py"])
+
+            coder.add_snippet("storage.py", "save_record", 0, 1)
+
+            self.assertEqual(coder.get_snippets_content(), "")
+
+    def test_dropping_a_file_drops_its_snippets(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.add_snippet("storage.py", "save_record", 0, 1)
+            coder.commands.cmd_drop("storage.py")
+
+            self.assertEqual(coder.snippets, {})
 
     def test_snippet_is_dropped_when_the_file_is_gone(self):
         with GitTemporaryDirectory():

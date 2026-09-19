@@ -58,12 +58,13 @@ Before guessing which files you need, you can ask me to *trace* a symbol.
 I will search the repo and reply with the places it is defined, called, read and written,
 as short snippets.
 
-To trace, put the names in a fenced block marked `trace`, one per line:
+To trace, put the names in a fenced block marked `trace`, one per line.
+Always use backticks for this block, even when the files in the chat use a different fence:
 
-{fence[0]}trace
+```trace
 get_factorial
 Buzzer.buzz_buzz up
-{fence[1]}
+```
 
 Add `up` after a name for only the callers, or `down` for only what it uses.
 This works for functions, classes, methods, and also for variables and attributes.

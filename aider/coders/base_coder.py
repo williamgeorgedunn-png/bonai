@@ -48,7 +48,7 @@ from aider.repomap import RepoMap
 from aider.run_cmd import run_cmd
 from aider.tracer import RepoTracer, TraceRequest, parse_trace_requests
 from aider.utils import format_content, format_messages, format_tokens, is_image_file
-from aider.waiting import WaitingSpinner
+from aider.waiting import Spinner, WaitingSpinner
 
 from ..dump import dump  # noqa: F401
 from .chat_chunks import ChatChunks
@@ -106,6 +106,7 @@ class Coder:
     focus_idents = None
     snippets = None
     trace_contents = None
+    pending_trace_contents = None
     traced_this_turn = None
     auto_trace_cache = None
     num_trace_rounds = 0
@@ -385,6 +386,7 @@ class Coder:
         self.snippets = dict(snippets) if snippets else dict()
         self.traced_this_turn = set()
         self.trace_contents = set()
+        self.pending_trace_contents = set()
         self.auto_trace_cache = None
 
         self.file_watcher = file_watcher
@@ -709,7 +711,13 @@ class Coder:
         """Just the named definitions, re-read every send so they stay current."""
 
         prompt = ""
+        chat_rel_fnames = self.get_chat_rel_fnames()
+
         for (rel_fname, symbol), (start_line, end_line) in list(self.snippets.items()):
+            # The whole file is in the chat, so the snippet would just repeat it
+            if rel_fname in chat_rel_fnames:
+                continue
+
             content = self.io.read_text(self.abs_root_path(rel_fname), silent=True)
             if content is None:
                 self.io.tool_warning(f"Dropping snippet {rel_fname}:{symbol}, file is gone.")
@@ -853,6 +861,15 @@ class Coder:
             self.get_rel_fname(fname) for fname in self.abs_read_only_fnames
         )
 
+    def get_symbol_index(self):
+        """The tracer's symbol index, with a spinner: the first build is slow."""
+
+        spin = Spinner("Indexing symbols")
+        try:
+            return self.tracer.get_index(self.get_all_abs_files(), progress=spin.step)
+        finally:
+            spin.end()
+
     def run_trace(self, req, max_tokens=None):
         """Run one trace, never letting a tracing problem break the chat."""
 
@@ -883,7 +900,7 @@ class Coder:
             return []
 
         try:
-            index = self.tracer.get_index(self.get_all_abs_files())
+            index = self.get_symbol_index()
         except Exception as err:
             self.io.tool_warning(f"Unable to index the repo for tracing: {err}")
             return []
@@ -913,25 +930,31 @@ class Coder:
         return [ident for _rank, _num_defs, ident in sorted(candidates)[:limit]]
 
     def get_auto_trace_text(self, text, limit=2):
-        """Trace symbols the message mentions, without the model asking."""
+        """Trace symbols the message mentions, without the model asking.
+
+        Returns (text, the request keys it covers) so a model that then asks
+        for one of them can be told it is already looking at it.
+        """
 
         idents = self.get_traceable_idents(text, limit=limit)
         if not idents:
-            return
+            return None, set()
 
         budget = self.trace_tokens // max(len(idents), 1)
 
         traces = []
+        keys = set()
         for ident in idents:
             req = TraceRequest(symbol=ident, direction="both", depth=1, file=None, strict=True)
             result = self.run_trace(req, max_tokens=budget)
             if result:
                 traces.append(result)
+                keys.add((req.symbol.lower(), req.direction, req.file))
 
         if not traces:
-            return
+            return None, set()
 
-        return self.gpt_prompts.trace_auto_prefix + "\n".join(traces)
+        return self.gpt_prompts.trace_auto_prefix + "\n".join(traces), keys
 
     def get_trace_messages(self):
         """A transient chunk of traces for what the user just asked about.
@@ -950,7 +973,7 @@ class Coder:
         if self.auto_trace_cache and self.auto_trace_cache[0] == text:
             return self.auto_trace_cache[1]
 
-        trace_text = self.get_auto_trace_text(text)
+        trace_text, keys = self.get_auto_trace_text(text)
         if trace_text:
             messages = [
                 dict(role="user", content=trace_text),
@@ -959,9 +982,17 @@ class Coder:
         else:
             messages = []
 
-        self.auto_trace_cache = (text, messages)
+        self.auto_trace_cache = (text, messages, keys)
 
         return messages
+
+    def get_auto_traced_keys(self):
+        """Requests already answered by the auto-trace chunk in the context."""
+
+        if not self.auto_trace_cache or not self.auto_trace_cache[1]:
+            return set()
+
+        return self.auto_trace_cache[2]
 
     def get_trace_reply(self, content):
         """Answer any trace requests in an LLM reply.
@@ -979,7 +1010,7 @@ class Coder:
             return
 
         try:
-            index = self.tracer.get_index(self.get_all_abs_files())
+            index = self.get_symbol_index()
         except Exception as err:
             self.io.tool_warning(f"Unable to index the repo for tracing: {err}")
             return
@@ -999,10 +1030,12 @@ class Coder:
 
         budget = self.trace_tokens // max(len(requests), 1)
 
+        auto_traced = self.get_auto_traced_keys()
+
         results = []
         for req in requests:
             key = (req.symbol.lower(), req.direction, req.file)
-            if key in self.traced_this_turn:
+            if key in self.traced_this_turn or key in auto_traced:
                 results.append(
                     f"\nI already traced `{req.symbol}` above, see those results."
                     " Tell me which files you need added to the chat."
@@ -1025,6 +1058,15 @@ class Coder:
         self.trace_contents.add(trace_text)
 
         return trace_text
+
+    def with_trace_reply(self, message, content):
+        """Answer any trace request alongside `message`, rather than dropping it."""
+
+        trace_message = self.get_trace_reply(content)
+        if not trace_message:
+            return message
+
+        return message + "\n\n" + trace_message
 
     def get_repo_messages(self):
         repo_messages = []
@@ -1169,7 +1211,10 @@ class Coder:
 
         self.num_trace_rounds = 0
         self.traced_this_turn = set()
-        self.trace_contents = set()
+        # /trace results were added before this message was sent, so they get
+        # this turn in the context and expire with everything else next turn
+        self.trace_contents = set(self.pending_trace_contents or ())
+        self.pending_trace_contents = set()
         self.auto_trace_cache = None
 
         if self.repo:
@@ -1894,9 +1939,7 @@ class Coder:
             if add_rel_files_message:
                 # The model is already asking for context, so answer any trace
                 # request in the same reply instead of costing it another round
-                trace_message = self.get_trace_reply(content)
-                if trace_message:
-                    add_rel_files_message += "\n\n" + trace_message
+                add_rel_files_message = self.with_trace_reply(add_rel_files_message, content)
 
                 if self.reflected_message:
                     self.reflected_message += "\n\n" + add_rel_files_message
@@ -1934,13 +1977,6 @@ class Coder:
         if self.reflected_message:
             return
 
-        # Traces are answered after any edits are applied, so a reply that
-        # both edits and traces doesn't lose its edits
-        trace_message = self.get_trace_reply(content)
-        if trace_message:
-            self.reflected_message = trace_message
-            return
-
         if edited and self.auto_lint:
             lint_errors = self.lint_edited(edited)
             self.auto_commit(edited, context="Ran the linter")
@@ -1948,7 +1984,7 @@ class Coder:
             if lint_errors:
                 ok = self.io.confirm_ask("Attempt to fix lint errors?")
                 if ok:
-                    self.reflected_message = lint_errors
+                    self.reflected_message = self.with_trace_reply(lint_errors, content)
                     return
 
         shared_output = self.run_shell_commands()
@@ -1964,8 +2000,14 @@ class Coder:
             if test_errors:
                 ok = self.io.confirm_ask("Attempt to fix test errors?")
                 if ok:
-                    self.reflected_message = test_errors
+                    self.reflected_message = self.with_trace_reply(test_errors, content)
                     return
+
+        # Traces are answered last, so a reply that both edits and traces still
+        # gets its edits applied, linted and tested
+        trace_message = self.get_trace_reply(content)
+        if trace_message:
+            self.reflected_message = trace_message
 
     def reply_completed(self):
         pass
