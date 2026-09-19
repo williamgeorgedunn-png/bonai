@@ -107,6 +107,7 @@ class Coder:
     focus_idents = None
     snippets = None
     file_reasons = None
+    pending_file_reasons = None
     limitation_log = None
     trace_contents = None
     pending_trace_contents = None
@@ -200,6 +201,7 @@ class Coder:
                 focus_idents=from_coder.focus_idents,
                 snippets=from_coder.snippets,
                 file_reasons=from_coder.file_reasons,
+                pending_file_reasons=from_coder.pending_file_reasons,
                 limitation_log=from_coder.limitation_log,
             )
             use_kwargs.update(update)  # override to complete the switch
@@ -372,6 +374,7 @@ class Coder:
         focus_idents=None,
         snippets=None,
         file_reasons=None,
+        pending_file_reasons=None,
         limitation_log=None,
         llm_log=True,
         llm_log_file=None,
@@ -397,6 +400,7 @@ class Coder:
         self.focus_idents = set(focus_idents) if focus_idents else set()
         self.snippets = dict(snippets) if snippets else dict()
         self.file_reasons = dict(file_reasons) if file_reasons else dict()
+        self.pending_file_reasons = dict(pending_file_reasons) if pending_file_reasons else dict()
         self.traced_this_turn = set()
         self.trace_contents = set()
         self.pending_trace_contents = set()
@@ -572,16 +576,19 @@ class Coder:
             self.limitation_log = limitation_log
         else:
             log_path = llm_log_file
-            history = getattr(io, "chat_history_file", None)
-            if llm_log and not log_path and isinstance(history, (str, Path)):
-                log_path = Path(history).with_name(".aider.llm-limitations.jsonl")
+            if llm_log and not log_path:
+                log_path = Path(self.root) / ".aider.llm-limitations.jsonl"
             self.limitation_log = LimitationLog(
                 path=log_path,
                 io=io,
                 enabled=llm_log,
-                model=getattr(self.main_model, "name", None),
-                edit_format=self.edit_format,
             )
+
+        # Stamp the current coder, including when the log is shared across a
+        # mode switch: otherwise entries keep the originating edit_format
+        if self.limitation_log:
+            self.limitation_log.model = getattr(self.main_model, "name", None)
+            self.limitation_log.edit_format = self.edit_format
 
         self.summarizer = summarizer or ChatSummary(
             [self.main_model.weak_model, self.main_model],
@@ -901,18 +908,26 @@ class Coder:
             pass
 
     def remember_file_reasons(self, reasons_by_file):
-        """Keep the latest 'why this file' notes from a trace."""
+        """Keep the latest 'why this file' notes from a trace.
 
+        Written to both the live map (for this turn) and a pending map that
+        survives the next `init_before_message`, then expires.
+        """
+
+        self._merge_file_reasons(self.file_reasons, reasons_by_file)
+        self._merge_file_reasons(self.pending_file_reasons, reasons_by_file)
+
+    def _merge_file_reasons(self, store, reasons_by_file):
         if not reasons_by_file:
             return
 
         for rel_fname, reasons in reasons_by_file.items():
-            existing = self.file_reasons.setdefault(rel_fname, [])
+            existing = store.setdefault(rel_fname, [])
             for reason in reasons:
                 if reason in existing:
                     existing.remove(reason)
                 existing.insert(0, reason)
-            self.file_reasons[rel_fname] = existing[:3]
+            store[rel_fname] = existing[:3]
 
     def file_reason_text(self, rel_fname):
         reasons = (self.file_reasons or {}).get(rel_fname) or []
@@ -1057,6 +1072,25 @@ class Coder:
 
         return self.auto_trace_cache[2]
 
+    def honoured_trace_requests(self, content):
+        """Trace requests we would actually run, not loose prose that we drop."""
+
+        if not self.tracer or not content:
+            return []
+
+        requests = parse_trace_requests(content)
+        if not requests:
+            return []
+
+        try:
+            index = self.get_symbol_index()
+        except Exception:
+            return []
+
+        return [
+            req for req in requests if req.strict or req.symbol.rpartition(".")[2] in index.defs
+        ]
+
     def get_trace_reply(self, content):
         """Answer any trace requests in an LLM reply.
 
@@ -1072,31 +1106,18 @@ class Coder:
         if log and log.looks_like_tool_xml(content):
             self.log_limitation("trace.tool_xml", excerpt=excerpt(content))
 
-        requests = parse_trace_requests(content)
+        parsed = parse_trace_requests(content)
+        requests = self.honoured_trace_requests(content)
         if not requests:
-            if log and log.looks_like_trace_attempt(content):
+            if parsed:
+                for req in parsed:
+                    self.log_limitation(
+                        "trace.loose_ignored",
+                        symbol=req.symbol,
+                        excerpt=excerpt(content),
+                    )
+            elif log and log.looks_like_trace_attempt(content):
                 self.log_limitation("trace.unparsed", excerpt=excerpt(content))
-            return
-
-        try:
-            index = self.get_symbol_index()
-        except Exception as err:
-            self.io.tool_warning(f"Unable to index the repo for tracing: {err}")
-            return
-
-        # Prose like "let me trace through the logic" is not a request
-        kept = [
-            req for req in requests if req.strict or req.symbol.rpartition(".")[2] in index.defs
-        ]
-        dropped = [req for req in requests if req not in kept]
-        for req in dropped:
-            self.log_limitation(
-                "trace.loose_ignored",
-                symbol=req.symbol,
-                excerpt=excerpt(content),
-            )
-        requests = kept
-        if not requests:
             return
 
         if self.num_trace_rounds >= self.max_trace_rounds:
@@ -1300,6 +1321,10 @@ class Coder:
         # this turn in the context and expire with everything else next turn
         self.trace_contents = set(self.pending_trace_contents or ())
         self.pending_trace_contents = set()
+        # File reasons last one extra message, then drop so they cannot
+        # label an unrelated later mention
+        self.file_reasons = dict(self.pending_file_reasons or {})
+        self.pending_file_reasons = {}
         self.auto_trace_cache = None
 
         if self.repo:
@@ -1936,6 +1961,10 @@ class Coder:
                     if not should_retry:
                         self.mdstream = None
                         self.check_and_open_urls(err, ex_info.description)
+                        if ex_info.name != "ContextWindowExceededError":
+                            self.log_limitation(
+                                "llm.error", name=ex_info.name, excerpt=excerpt(err)
+                            )
                         break
 
                     err_msg = str(err)
@@ -2094,7 +2123,7 @@ class Coder:
 
         # Traces are answered last, so a reply that both edits and traces still
         # gets its edits applied, linted and tested
-        if edited and parse_trace_requests(content):
+        if edited and self.honoured_trace_requests(content):
             self.log_limitation(
                 "trace.with_edits",
                 files=sorted(edited),
@@ -2310,8 +2339,6 @@ class Coder:
                 # Still calculate costs for context window errors
                 self.calculate_and_show_tokens_and_cost(messages, completion)
                 self.log_limitation("context.exceeded", excerpt=excerpt(err))
-            else:
-                self.log_limitation("llm.error", name=ex_info.name, excerpt=excerpt(err))
             raise
         except KeyboardInterrupt as kbi:
             self.keyboard_interrupt()

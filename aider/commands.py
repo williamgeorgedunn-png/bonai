@@ -1529,8 +1529,7 @@ class Commands:
             self.io.tool_error(f"Can't read a symbol name out of: {args}")
             return
 
-        if req.direction == "both":
-            req = req._replace(direction="tests")
+        req = req._replace(direction="tests")
 
         result = self.coder.run_trace(req)
         if not result:
@@ -1543,7 +1542,10 @@ class Commands:
         if not hits:
             return
 
-        if not self.io.confirm_ask("Add those tests to the chat as read-only snippets?"):
+        noun = "test" if len(hits) == 1 else "tests"
+        if not self.io.confirm_ask(
+            f"Add those {len(hits)} {noun} to the chat as read-only snippets?"
+        ):
             return
 
         try:

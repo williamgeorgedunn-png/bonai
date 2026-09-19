@@ -527,6 +527,83 @@ class TestCoderTracing(unittest.TestCase):
             self.assertIn("trace.unknown", kinds)
             self.assertIn("trace.tool_xml", kinds)
 
+    def test_file_reasons_expire_after_one_extra_message(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.get_trace_reply("```trace\nhandle_request\n```\n")
+            self.assertTrue(coder.file_reason_text("api.py"))
+
+            coder.init_before_message()
+            self.assertTrue(coder.file_reason_text("api.py"))
+
+            coder.init_before_message()
+            self.assertEqual(coder.file_reason_text("api.py"), "")
+
+    def test_tests_command_ignores_an_extra_direction(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            printed = []
+            coder.io.tool_output = lambda msg="", **k: printed.append(str(msg))
+            coder.commands.cmd_tests("handle_request up")
+
+            text = "\n".join(printed)
+            self.assertIn("Tests that exercise", text)
+            self.assertNotIn("Callers of", text)
+
+    def test_shared_limitation_log_uses_the_new_edit_format(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            log_path = Path(".aider.llm-limitations.jsonl")
+            coder = self.make_coder(map_tokens=1024, llm_log=True, llm_log_file=str(log_path))
+
+            ask = Coder.create(from_coder=coder, edit_format="ask")
+            self.assertEqual(ask.edit_format, "ask")
+            ask.log_limitation("probe")
+
+            entry = json.loads(log_path.read_text().splitlines()[-1])
+            self.assertEqual(entry["kind"], "probe")
+            self.assertEqual(entry["edit_format"], "ask")
+
+    def test_rate_limit_logs_llm_error_once(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            log_path = Path(".aider.llm-limitations.jsonl")
+            coder = self.make_coder(map_tokens=1024, llm_log=True, llm_log_file=str(log_path))
+
+            from unittest.mock import patch
+
+            from litellm.exceptions import RateLimitError
+
+            def boom(*args, **kwargs):
+                raise RateLimitError("slow down", "openai", "gpt-3.5-turbo")
+
+            coder.main_model.send_completion = boom
+            coder.init_before_message()
+            with patch("aider.coders.base_coder.time.sleep"):
+                list(coder.send_message("hello"))
+
+            kinds = [json.loads(line)["kind"] for line in log_path.read_text().splitlines() if line]
+            self.assertEqual(kinds.count("llm.error"), 1)
+
+    def test_tool_xml_inside_a_fence_is_not_a_trace_attempt(self):
+        from aider.limitation_log import LimitationLog
+
+        log = LimitationLog(path=None, enabled=False)
+        self.assertFalse(
+            log.looks_like_tool_xml(
+                "Here is the edit:\n```xml\n<parameter>count</parameter>\n```\n"
+            )
+        )
+        self.assertTrue(
+            log.looks_like_tool_xml("<tool_call><function=trace></function></tool_call>")
+        )
+        self.assertFalse(log.looks_like_trace_attempt("Trace files are stored in /tmp.\n"))
+        self.assertTrue(log.looks_like_trace_attempt("```trace\nfoo\n```\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

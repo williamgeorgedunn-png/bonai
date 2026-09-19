@@ -669,7 +669,7 @@ class RepoTracer:
             text, shown_files = self.render_hits(
                 index,
                 prod_hits,
-                total,
+                len(prod_hits),
                 max(budget, 0) * (0.7 if req.direction == "both" else 1.0),
                 title=f"Callers of `{name}`",
                 empty=f"No calls to `{name}` found outside its own definition.",
@@ -795,15 +795,25 @@ class RepoTracer:
             return f"{verb} `{name}` from `{scope_name}`"
         return f"{verb} `{name}`"
 
-    def render_test_index(self, name, test_hits):
-        """A compact list of the tests that exercise `name`, not snippets."""
+    def note_hits(self, name, hits):
+        """Record why each file appeared, after we know the name is not too common."""
 
-        if not test_hits:
-            return "", set()
+        for hit in hits:
+            if is_test_path(hit.rel_fname):
+                verb = "tests"
+            elif hit.kind in ("write", "param"):
+                verb = "writes"
+            elif hit.kind == "call":
+                verb = "calls"
+            else:
+                verb = "reads"
+            self.note_file(hit.rel_fname, self.reason_for_hit(name, verb, hit.scope_name))
 
+    def unique_test_hits(self, test_hits):
+        """Deduped test hits, one per enclosing function, richest file first."""
+
+        unique = []
         seen = set()
-        lines = []
-        files = set()
         for hit in sorted(
             test_hits, key=lambda hit: self.file_sort_key(hit.rel_fname) + (hit.line,)
         ):
@@ -811,18 +821,27 @@ class RepoTracer:
             if key in seen:
                 continue
             seen.add(key)
-            files.add(hit.rel_fname)
-            where = hit.scope_name or f"line {hit.line + 1}"
-            lines.append(f"- {hit.rel_fname}: `{where}`")
-            if len(lines) >= MAX_TESTS:
-                break
+            unique.append(hit)
+        return unique
 
-        leftover = len(seen) - len(lines)
-        header = f"\nTests that exercise `{name}` ({len(seen)} found):"
-        if leftover > 0:
-            lines.append(f"- ...and {leftover} more")
+    def render_test_index(self, name, test_hits):
+        """A compact list of the tests that exercise `name`, not snippets."""
 
-        self.last_test_hits = list(test_hits)
+        if not test_hits:
+            return "", set()
+
+        unique = self.unique_test_hits(test_hits)
+        shown = unique[:MAX_TESTS]
+        files = {hit.rel_fname for hit in shown}
+        lines = [
+            f"- {hit.rel_fname}: `{hit.scope_name or f'line {hit.line + 1}'}`" for hit in shown
+        ]
+        if len(unique) > len(shown):
+            lines.append(f"- ...and {len(unique) - len(shown)} more")
+
+        # Only the tests we actually listed, so /tests adds what the user saw
+        self.last_test_hits = shown
+        header = f"\nTests that exercise `{name}` ({len(unique)} found):"
         return header + "\n" + "\n".join(lines), files
 
     def trace_tests(self, index, req, name, container, defs, chat_rel_fnames, max_tokens):
@@ -854,13 +873,15 @@ class RepoTracer:
             )
             test_hits = hits
 
-        if not test_hits and not total:
+        if not test_hits:
             self.last_status = "unknown"
             return f"\nNo tests that exercise `{req.symbol}` found in the repo.", set()
 
+        self.note_hits(name, test_hits)
+
         kind_label = "function/class" if kind == "callable" else "variable"
         sections = [self.describe_symbol(index, req.symbol, kind_label, def_scopes)]
-        self.last_test_hits = list(test_hits)
+        self.last_test_hits = self.unique_test_hits(test_hits)[:MAX_TESTS]
 
         text, shown_files = self.render_hits(
             index,
@@ -921,6 +942,8 @@ class RepoTracer:
         if len(file_counts) > MAX_FILES_BEFORE_AMBIGUOUS:
             self.last_status = "ambiguous"
             return self.render_ambiguous_files(req, name, total, file_counts), set()
+
+        self.note_hits(name, hits)
 
         kind_label = "attribute" if attribute else "variable"
         def_scopes = [index.scope_for_def(tag) for tag in defs]
@@ -1071,14 +1094,6 @@ class RepoTracer:
                     scope = index.innermost_scope(rel_fname, lineno)
                     scope_name = index.qualified_name(scope) if scope else ""
                     hits.append(Hit(rel_fname, lineno, kind, scope_name, note))
-
-                    if is_test_path(rel_fname):
-                        verb = "tests"
-                    elif kind in ("write", "param"):
-                        verb = "writes"
-                    else:
-                        verb = "reads"
-                    self.note_file(rel_fname, self.reason_for_hit(name, verb, scope_name))
 
         return hits, total, skipped_in_chat, file_counts, truncated
 

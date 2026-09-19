@@ -460,6 +460,38 @@ class TestRepoTracer(unittest.TestCase):
         self.assertEqual(self.tracer.last_status, "ok")
         self.assertTrue(self.tracer.last_test_hits)
 
+    def test_test_index_reports_the_true_count_and_overflow(self):
+        body = "from service import handle_request\n\n"
+        for i in range(12):
+            body += f"def test_handle_{i}():\n    handle_request({i!r})\n\n"
+        path = os.path.join(self.temp_dir, "tests", "test_many.py")
+        with open(path, "w") as f:
+            f.write(body)
+        self.abs_fnames.append(path)
+        self.repo_map.symbol_index = None
+
+        result = self.trace("handle_request")
+
+        # 12 new tests plus test_handle_request_strips
+        self.assertIn("Tests that exercise `handle_request` (13 found):", result)
+        self.assertIn("...and 5 more", result)
+        self.assertEqual(len(self.tracer.last_test_hits), 8)
+
+    def test_callers_header_does_not_count_the_tests(self):
+        result = self.trace("handle_request", direction="up")
+
+        # api (post, put), cli, worker — tests are a separate section
+        self.assertRegex(result, r"Callers of `handle_request` \(4 found\):")
+        self.assertIn("Tests that exercise `handle_request` (1 found):", result)
+        callers_header = result.split("Callers of")[1].split("\n")[0]
+        self.assertNotIn("showing", callers_header)
+
+    def test_untested_symbol_is_unknown_when_asking_for_tests(self):
+        result = self.trace("lonely_helper", direction="tests")
+
+        self.assertIn("No tests that exercise", result)
+        self.assertEqual(self.tracer.last_status, "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

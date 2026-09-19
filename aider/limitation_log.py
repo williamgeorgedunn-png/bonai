@@ -17,10 +17,37 @@ TOOL_XML_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A reply that looks like it tried to ask for a trace, even if we ignored it
-TRACE_ATTEMPT_RE = re.compile(r"```+\s*trace\b|^\s*trace\b", re.IGNORECASE | re.MULTILINE)
+# A fenced ```trace that we failed to honour. Loose prose is handled separately.
+TRACE_ATTEMPT_RE = re.compile(r"```+\s*trace\b", re.IGNORECASE)
+
+FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 EXCERPT_LEN = 240
+MAX_ENTRIES = 200
+
+
+def outside_fences(content):
+    """The parts of a reply that are not inside a fenced code block."""
+
+    if not content:
+        return ""
+
+    kept = []
+    in_fence = False
+    fence_char = None
+    for line in content.splitlines():
+        fence = FENCE_LINE_RE.match(line)
+        if fence and in_fence and line.strip()[0] == fence_char:
+            in_fence = False
+            fence_char = None
+            continue
+        if fence and not in_fence:
+            in_fence = True
+            fence_char = line.strip()[0]
+            continue
+        if not in_fence:
+            kept.append(line)
+    return "\n".join(kept)
 
 
 def excerpt(text, limit=EXCERPT_LEN):
@@ -67,6 +94,8 @@ class LimitationLog:
                 entry[key] = str(value)
 
         self.entries.append(entry)
+        if len(self.entries) > MAX_ENTRIES:
+            self.entries = self.entries[-MAX_ENTRIES:]
 
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +107,7 @@ class LimitationLog:
             self.enabled = False
 
     def looks_like_tool_xml(self, content):
-        return bool(content and TOOL_XML_RE.search(content))
+        return bool(TOOL_XML_RE.search(outside_fences(content)))
 
     def looks_like_trace_attempt(self, content):
         return bool(content and TRACE_ATTEMPT_RE.search(content))
