@@ -1,6 +1,8 @@
 # Pipeline mode: architect / worker on two local GPUs
 
-Status: draft specification for implementation. Not yet implemented.
+Status: draft specification. Implementation is deferred until concurrent
+work on this repo is merged. Commit policy is decided: **one git commit per
+accepted task**; do not squash at the end of a run.
 
 This document specifies a new opt-in aider mode ("pipeline mode") in which a
 stronger local model acts as an **architect** (plans, briefs, reviews) and a
@@ -43,7 +45,9 @@ rationale; sections 4 onwards are the normative spec.
 - Delivery is in five phases. Phase 0 is configuration only (two servers, two
   models, existing `--architect`) and produces a measured baseline. Phase 1
   is the minimal orchestration loop. Phases 2 to 4 add the knowledge tiers,
-  the test loop and robustness.
+  the test loop and robustness. Implementation waits until concurrent work
+  on this repo is merged. Git policy: one commit per accepted task, never
+  squashed.
 
 ---
 
@@ -194,6 +198,8 @@ Non-goals (for this spec)
 - Replacing the existing `architect` mode. Pipeline mode is a new edit format.
 - GUI/browser support.
 - Perfect JSON adherence from local models; we parse leniently and retry.
+- Squashing pipeline commits. One accepted task is one commit, left in
+  history as-is.
 
 ---
 
@@ -212,8 +218,12 @@ Non-goals (for this spec)
 5. **Small, verifiable worker tasks.** One editable file, explicit
    acceptance criteria, lint + diff review + tests, automatic retry with a
    revised brief, hard retry caps.
-6. **Every accepted task is a commit.** Aider's `/undo` semantics apply per
-   task.
+6. **Every accepted task is exactly one commit.** The commit is created
+   when REVIEW returns ACCEPT, covers only that task's target file, and is
+   never squashed with other pipeline commits at DONE. Retries happen
+   *before* ACCEPT, so a retried task still produces one commit. Post-commit
+   test fixes become a new task with its own commit. Aider's `/undo`
+   semantics apply per task. Do not implement `/pipeline squash`.
 7. **Human checkpoints are configurable, not mandatory.** Approve plan only
    (default), approve every task, or fully automatic.
 
@@ -361,7 +371,9 @@ COMMIT(task)  git commit of the target file, message from brief title
   v
 TEST(task)?   if task.kind == test or a test_cmd is configured and task touched
   |           code covered by existing tests: run test_cmd, trim output
-  |           failures -> TRIAGE(architect): FIX_CODE(new task or retry) | FIX_TEST | ACCEPT_KNOWN | ESCALATE
+  |           failures -> TRIAGE(architect): FIX_CODE | FIX_TEST | ACCEPT_KNOWN | ESCALATE
+  |             FIX_CODE / FIX_TEST insert a *new* task (new file-scoped brief, own commit);
+  |             they never amend or reopen the already-committed task.
   v
 SCHEDULE
 ```
@@ -427,7 +439,10 @@ prefix described in 5.4.
 **COMMIT(task)**
 - `repo.commit(fnames=[file], message=f"pipeline {id}: {title}")` via aider's
   `GitRepo`, recorded in `task.commit`. Uses the existing aider commit
-  attribution settings.
+  attribution settings. This is the only commit for that task: do not amend
+  it later, do not squash it into neighbouring pipeline commits, and do not
+  fold later test-fix work into it. If tests later require more code
+  changes, schedule a new task.
 
 **TEST(task)**
 - Runs `test_cmd` through `commands.cmd_test`-equivalent plumbing but captures
@@ -435,10 +450,13 @@ prefix described in 5.4.
   `verify.trim_test_output()`: keep the final summary block and the first
   failing test's traceback, cap at `test_output_tokens` (default 1500).
 - TRIAGE(architect) inputs: task list view, trimmed output. Output:
-  `VERDICT: FIX_CODE|FIX_TEST|ACCEPT_KNOWN|ESCALATE` plus, for the FIX
-  verdicts, a brief for the retry (targeting either the code file or the
-  test file; one file per retry). Test retries count against
-  `max_test_rounds` (default 3) per task.
+  `VERDICT: FIX_CODE|FIX_TEST|ACCEPT_KNOWN|ESCALATE`. For the FIX
+  verdicts, the architect also emits a new task (same schema as PLAN: one
+  file, depends_on the just-committed task) plus its brief. The orchestrator
+  inserts that task into the ledger and schedules it; it becomes its own
+  commit when accepted. Do not reopen, amend, or squash the original task.
+  Inserted triage tasks count against `max_test_rounds` (default 3) for the
+  original task so a failing test cannot spawn unbounded follow-up work.
 
 **COMPACT** (architect, triggered by the orchestrator, see 5.4)
 - Inputs: current working memory items with ids and token costs, and the
@@ -950,10 +968,12 @@ Scope: `kind: test` tasks, TEST_BRIEF, WRITE_TEST worker, test run and
 output trimming, TRIAGE verdicts, `--pipeline-tdd`, `max_test_rounds`.
 
 Acceptance:
-- On a fixture where the worker's first implementation fails a test, TRIAGE
-  returns FIX_CODE, a retry brief is generated targeting only the code file,
-  and the second run passes; the ledger shows two attempts and one commit
-  per accepted state.
+- On a fixture where the worker's first implementation is accepted and
+  committed, then tests fail, TRIAGE returns FIX_CODE, a *new* task is
+  inserted targeting only the code file, that task is accepted and
+  committed separately, and the second test run passes. The ledger shows
+  two accepted tasks and two commits; the original task's commit is
+  unchanged.
 - Trimmed test output never exceeds `test_output_tokens` and always contains
   the summary line and the first failure's assertion message.
 - With `--pipeline-tdd`, test tasks run before their dependencies and a
@@ -1011,8 +1031,10 @@ deterministic.
    a clear error ("architect endpoint not reachable at ...") are enough.
 6. **Interplay with concurrent development.** All new code is in new modules
    plus small additive edits in `args.py`, `main.py`, `commands.py`,
-   `coders/__init__.py`, `io.py`. Rebase risk is low.
-7. **Open question for the user:** should accepted-task commits be squashed
-   at DONE into a single commit (with the plan as the message), or left as
-   one commit per task? Default in this spec: one per task, with a
-   `/pipeline squash` convenience in Phase 4.
+   `coders/__init__.py`, `io.py`. Rebase risk is low. Implementation of this
+   spec waits until that concurrent work is merged.
+7. **Commit policy (decided).** One git commit per accepted task. No squash
+   at DONE, no `/pipeline squash` command, no amending an accepted task's
+   commit when later tests fail — those become a new task and a new commit.
+   This keeps `/undo` granular and the ledger's `task.commit` a 1:1 map to
+   git history.
