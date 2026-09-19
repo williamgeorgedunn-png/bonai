@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from pathlib import Path
@@ -37,6 +38,14 @@ def post(raw_value):
     return handle_request(raw_value)
 """
 
+TEST_SERVICE_PY = """\
+from service import handle_request
+
+
+def test_handle_request_strips():
+    assert handle_request(" x ") == "x"
+"""
+
 EDIT_AND_TRACE = """\
 Here is the change, and I need to see the callers too.
 
@@ -62,9 +71,12 @@ class TestCoderTracing(unittest.TestCase):
             "service.py": SERVICE_PY,
             "storage.py": STORAGE_PY,
             "api.py": API_PY,
+            "tests/test_service.py": TEST_SERVICE_PY,
         }
         for fname, content in files.items():
-            Path(fname).write_text(content)
+            path = Path(fname)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
 
         repo = git.Repo.init(os.getcwd())
         repo.git.add(A=True)
@@ -74,6 +86,7 @@ class TestCoderTracing(unittest.TestCase):
 
     def make_coder(self, **kwargs):
         io = InputOutput(yes=True)
+        kwargs.setdefault("llm_log", False)
         return Coder.create(self.GPT35, "diff", io=io, use_git=True, **kwargs)
 
     def reply_with(self, coder, content):
@@ -464,6 +477,55 @@ class TestCoderTracing(unittest.TestCase):
 
             self.assertIn("save_record", ask_coder.focus_idents)
             self.assertIn(("storage.py", "save_record"), ask_coder.snippets)
+
+    def test_file_add_prompt_says_why_the_file_was_suggested(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.get_trace_reply("```trace\nhandle_request\n```\n")
+            self.assertTrue(coder.file_reason_text("api.py"))
+
+            asked = []
+
+            def capture(question, subject=None, **kwargs):
+                asked.append(subject)
+                return True
+
+            coder.io.confirm_ask = capture
+            coder.check_for_file_mentions("Please add api.py")
+
+            self.assertTrue(asked)
+            self.assertIn("api.py", asked[0])
+            self.assertIn("handle_request", asked[0])
+
+    def test_tests_command_adds_the_test_as_a_snippet(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            coder = self.make_coder(map_tokens=1024)
+
+            coder.commands.cmd_tests("handle_request")
+
+            self.assertTrue(
+                any("test_service.py" in key[0] for key in coder.snippets),
+                coder.snippets,
+            )
+
+    def test_limitation_log_records_unknown_and_tool_xml(self):
+        with GitTemporaryDirectory():
+            self.make_repo()
+            log_path = Path(".aider.llm-limitations.jsonl")
+            coder = self.make_coder(map_tokens=1024, llm_log=True, llm_log_file=str(log_path))
+
+            coder.get_trace_reply("```trace\nzzzz_not_here\n```\n")
+            coder.get_trace_reply(
+                "<tool_call>\n<function=trace>\n<parameter=name>handle_request</parameter>\n"
+                "</function>\n</tool_call>\n"
+            )
+
+            kinds = [json.loads(line)["kind"] for line in log_path.read_text().splitlines() if line]
+            self.assertIn("trace.unknown", kinds)
+            self.assertIn("trace.tool_xml", kinds)
 
 
 if __name__ == "__main__":

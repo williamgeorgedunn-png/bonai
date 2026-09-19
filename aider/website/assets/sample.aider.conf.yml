@@ -164,6 +164,12 @@
 ## Log the conversation with the LLM to this file (for example, .aider.llm.history)
 #llm-history-file: xxx
 
+## Log LLM limitations (malformed edits, failed traces, blown context) to a local file, for later prompt work (default: True)
+#llm-log: true
+
+## File for the limitation log (default: .aider.llm-limitations.jsonl)
+#llm-log-file: xxx
+
 ##################
 # Output settings:
 

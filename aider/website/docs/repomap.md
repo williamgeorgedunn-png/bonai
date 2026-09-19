@@ -121,7 +121,9 @@ short snippets rather than whole files:
   marked `trace` containing the names it wants. Aider answers with the results
   and lets it try again, the same way it handles a request to add files.
 - You can run one yourself with `/trace some_function`, optionally with `up`
-  for just the callers or `down` for just what it uses.
+  for just the callers, `down` for just what it uses, or `tests` for the
+  tests that exercise it. `/tests some_function` does the same and offers
+  to add those tests as snippets.
 
 A trace looks like this:
 
@@ -172,6 +174,10 @@ A name like `count` is used everywhere, so ask for one place instead:
 - `/trace count in app/service.py` searches only that file.
 - `/trace handle_request.count` searches only inside that function or class.
 
+When aider then asks to add a file, it says why it is suggesting it —
+`api.py` / `calls handle_request from post` — so you can decide from the
+trace, not just the filename.
+
 Use `--trace-tokens` to size the results, `--no-auto-trace` to only trace when
 asked, and `--no-trace` to turn it off. Tracing needs the repo map, so it is
 off whenever the map is.
@@ -182,6 +188,9 @@ Two related commands help keep the context small:
 - `/snip some_function` adds just that function to the chat as a read-only
   snippet, instead of its whole file. Adding the whole file supersedes its
   snippets, and dropping the file removes them.
+- `/tests some_function` finds the tests that call it and offers to add
+  those test functions as snippets, so you can see the expected behaviour
+  without loading whole test files.
 
 ## More info
 

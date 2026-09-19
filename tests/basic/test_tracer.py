@@ -85,6 +85,14 @@ def beta(total):
     return ratio
 """
 
+TEST_SERVICE_PY = """\
+from service import handle_request
+
+
+def test_handle_request_strips():
+    assert handle_request(" x ") == "x"
+"""
+
 
 class TestTraceParsing(unittest.TestCase):
     def test_clean_symbol_strips_decoration(self):
@@ -105,6 +113,7 @@ class TestTraceParsing(unittest.TestCase):
         self.assertEqual(parse_trace_line("foo callers").direction, "up")
         self.assertEqual(parse_trace_line("foo down").direction, "down")
         self.assertEqual(parse_trace_line("foo callees").direction, "down")
+        self.assertEqual(parse_trace_line("foo tests").direction, "tests")
         self.assertEqual(parse_trace_line("- `foo()` upstream").symbol, "foo")
         self.assertEqual(parse_trace_line("1. foo").symbol, "foo")
 
@@ -225,10 +234,13 @@ class TestRepoTracer(unittest.TestCase):
             "cli.py": CLI_PY,
             "worker.py": WORKER_PY,
             "counters.py": COUNTERS_PY,
+            "tests/test_service.py": TEST_SERVICE_PY,
             "unrelated.py": UNRELATED_PY,
         }
         for fname, content in self.files.items():
-            with open(os.path.join(self.temp_dir, fname), "w") as f:
+            path = os.path.join(self.temp_dir, fname)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
                 f.write(content)
 
         self.io = InputOutput()
@@ -416,6 +428,37 @@ class TestRepoTracer(unittest.TestCase):
     def test_trace_output_has_line_numbers(self):
         result = self.trace("handle_request", direction="up")
         self.assertRegex(result, r"\n\s*\d+│")
+
+    def test_trace_records_why_each_file_appeared(self):
+        self.trace("handle_request")
+        reasons = self.tracer.last_file_reasons
+
+        self.assertTrue(any("defines `handle_request`" in r for r in reasons.get("service.py", [])))
+        self.assertTrue(
+            any("calls `handle_request`" in r for r in reasons.get("api.py", [])),
+            reasons,
+        )
+        self.assertTrue(
+            any("tests `handle_request`" in r for r in reasons.get("tests/test_service.py", [])),
+            reasons,
+        )
+
+    def test_trace_lists_the_tests_that_exercise_a_function(self):
+        result = self.trace("handle_request")
+
+        self.assertIn("Tests that exercise", result)
+        self.assertIn("tests/test_service.py", result)
+        self.assertIn("test_handle_request_strips", result)
+        # The compact list is not a snippet of the test body
+        self.assertNotIn("assert handle_request", result)
+
+    def test_trace_tests_direction_shows_the_test_body(self):
+        result = self.trace("handle_request", direction="tests")
+
+        self.assertIn("tests/test_service.py", result)
+        self.assertIn("assert handle_request", result)
+        self.assertEqual(self.tracer.last_status, "ok")
+        self.assertTrue(self.tracer.last_test_hits)
 
 
 if __name__ == "__main__":
