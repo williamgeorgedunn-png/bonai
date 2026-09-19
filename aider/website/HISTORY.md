@@ -30,9 +30,11 @@ cog.out(text)
   - Aider traces symbols mentioned by you or the LLM automatically, and the results are dropped from the chat history after one message.
   - The LLM can ask for a trace itself with a fenced `trace` block, and aider replies with the results, the same way it handles a request to add files.
   - Variables and attributes are traced too, split into where they are set and where they are read, and followed one hop through calls and returns.
+  - A name that is too common to trace can be narrowed to one file, with `count in app/service.py`, or to one enclosing function, with `handle_request.count`.
   - New `/trace` command, plus `--trace`, `--auto-trace` and `--trace-tokens` settings.
 - Added `/focus` and `/unfocus` to keep the repo map centered on chosen symbols across turns.
 - Added `/snip` and `/unsnip` to put a single function or class in the chat as a read-only snippet, instead of its whole file.
+- Fixed the repo map capturing the last node of every tags query twice.
 
 - Expanded `ANTHROPIC_MODELS` list with Claude Opus 4.1/4.5/4.6/4.7 dated variants and Claude Sonnet 3.7 so the Anthropic API key auto-detection (`models.sanity_check_models`) recognises them.
 - Added support for Claude 4.5/4.6 models and updated model aliases (sonnet/haiku/opus).

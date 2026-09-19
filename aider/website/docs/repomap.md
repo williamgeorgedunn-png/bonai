@@ -167,6 +167,11 @@ language server or a type checker. That makes it cheap and predictable, but it
 means dynamically dispatched calls can be missed, and a very common name may
 come back asking you to be more specific.
 
+A name like `count` is used everywhere, so ask for one place instead:
+
+- `/trace count in app/service.py` searches only that file.
+- `/trace handle_request.count` searches only inside that function or class.
+
 Use `--trace-tokens` to size the results, `--no-auto-trace` to only trace when
 asked, and `--no-trace` to turn it off. Tracing needs the repo map, so it is
 off whenever the map is.
@@ -175,7 +180,8 @@ Two related commands help keep the context small:
 
 - `/focus some_symbol` keeps the repo map centered on a symbol across turns.
 - `/snip some_function` adds just that function to the chat as a read-only
-  snippet, instead of its whole file.
+  snippet, instead of its whole file. Adding the whole file supersedes its
+  snippets, and dropping the file removes them.
 
 ## More info
 
