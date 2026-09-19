@@ -6,6 +6,10 @@ description: Split work between a planning model and a small editing model, each
 
 # Pipeline mode
 
+A GitHub-readable how-to is in
+[`docs/using-pipeline-and-dual-gpu.md`](https://github.com/williamgeorgedunn-png/bonai/blob/main/docs/using-pipeline-and-dual-gpu.md).
+This page is the same material, aimed at the website.
+
 Pipeline mode runs two models with different jobs. A stronger **architect**
 plans the work, writes one brief per file and reviews every change. A smaller
 **worker** does the editing: one file at a time, with an empty context for each

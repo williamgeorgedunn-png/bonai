@@ -110,7 +110,11 @@ The repo map shows *definitions*. It doesn't show how they connect, so a model
 often can't tell where something is actually done, and ends up guessing which
 files to ask for.
 
-Tracing fills that gap. It searches the same tree-sitter data the repo map is
+Tracing fills that gap. For a how-to — `/trace`, `/tests`, `/focus`, `/snip`,
+and the flags — see **[tracing code](/docs/usage/tracing.html)**. The rest of this
+section is the same idea in more detail.
+
+It searches the same tree-sitter data the repo map is
 built from and reports where a symbol is defined, called, read and written, as
 short snippets rather than whole files:
 

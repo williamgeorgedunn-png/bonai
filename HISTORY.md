@@ -2,6 +2,7 @@
 
 ### main branch
 
+- Added user guides for pipeline mode on two GPUs and for `/trace`, in `docs/` and under Usage on the website.
 - Added pipeline mode (`--pipeline`): a planning architect and a small editing worker, each with a bounded context, aimed at two local GPUs.
   - The architect is stateless per step (ledger + working memory + outlines). REVIEW sees a token-capped git diff; `NEED: source` can pull one symbol.
   - The worker edits one file per task with a wiped history; the coder object is reused so the local server can keep its KV cache.

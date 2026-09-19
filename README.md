@@ -131,6 +131,8 @@ See the [installation instructions](https://aider.chat/docs/install.html) and [u
 - [Configuration Options](https://aider.chat/docs/config.html)
 - [Troubleshooting](https://aider.chat/docs/troubleshooting.html)
 - [FAQ](https://aider.chat/docs/faq.html)
+- [Pipeline mode on two GPUs](docs/using-pipeline-and-dual-gpu.md) — plan with one local model, edit with another
+- [Tracing code](docs/using-tracing.md) — `/trace` a symbol instead of adding whole files
 
 ### Community & Resources
 - [LLM Leaderboards](https://aider.chat/docs/leaderboards/)

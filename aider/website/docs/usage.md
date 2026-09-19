@@ -90,3 +90,23 @@ so they are easy to track and undo.
 
 You can always use the `/undo` command to undo AI changes that you don't
 like.
+
+## Pipeline mode (two models)
+
+To split planning and editing across two models — typically one per GPU —
+see [pipeline mode](/docs/usage/pipeline.html) and
+[two local models on two GPUs](/docs/llms/dual-gpu-local.html).
+A GitHub-readable how-to is in
+[`docs/using-pipeline-and-dual-gpu.md`](https://github.com/williamgeorgedunn-png/bonai/blob/main/docs/using-pipeline-and-dual-gpu.md).
+
+```
+aider --pipeline --model <architect> --editor-model <worker>
+```
+
+## Tracing code
+
+Aider can show where a symbol is defined, called, read and written without
+adding whole files. That is on by default, and you can run it yourself with
+`/trace some_function`. See [tracing code](/docs/usage/tracing.html), or
+[`docs/using-tracing.md`](https://github.com/williamgeorgedunn-png/bonai/blob/main/docs/using-tracing.md).
+
