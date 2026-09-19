@@ -50,6 +50,7 @@ cog.out(get_help_md())
 | **/multiline-mode** | Toggle multiline mode (swaps behavior of Enter and Meta+Enter) |
 | **/ok** | Alias for `/code Ok, please go ahead and make those changes.` (any args are appended) |
 | **/paste** | Paste image/text from the clipboard into the chat.        Optionally provide a name for the image. |
+| **/pipeline** | Run or inspect a two-model pipeline: status, resume, plan, skip, retry, abort, digest, edit |
 | **/quit** | Exit the application |
 | **/read-only** | Add files to the chat that are for reference only, or turn added files to read-only |
 | **/reasoning-effort** | Set the reasoning effort level (values: number or low/medium/high depending on model) |
