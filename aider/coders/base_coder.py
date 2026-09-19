@@ -38,6 +38,7 @@ from aider.limitation_log import LimitationLog, excerpt
 from aider.linter import Linter
 from aider.llm import litellm
 from aider.models import RETRY_TIMEOUT
+from aider.pipeline.config import PipelineConfig
 from aider.reasoning_tags import (
     REASONING_TAG,
     format_reasoning_content,
@@ -203,6 +204,8 @@ class Coder:
                 file_reasons=from_coder.file_reasons,
                 pending_file_reasons=from_coder.pending_file_reasons,
                 limitation_log=from_coder.limitation_log,
+                pipeline_config=from_coder.pipeline_config,
+                pipeline_worker_model=from_coder.pipeline_worker_model,
             )
             use_kwargs.update(update)  # override to complete the switch
             use_kwargs.update(kwargs)  # override passed kwargs
@@ -373,6 +376,8 @@ class Coder:
         trace_tokens=None,
         focus_idents=None,
         snippets=None,
+        pipeline_config=None,
+        pipeline_worker_model=None,
         file_reasons=None,
         pending_file_reasons=None,
         limitation_log=None,
@@ -392,6 +397,11 @@ class Coder:
 
         self.auto_copy_context = auto_copy_context
         self.auto_accept_architect = auto_accept_architect
+
+        # Only PipelineCoder reads these, but every coder accepts them so that
+        # switching edit formats mid-chat keeps working.
+        self.pipeline_config = pipeline_config or PipelineConfig()
+        self.pipeline_worker_model = pipeline_worker_model
 
         self.ignore_mentions = ignore_mentions
         if not self.ignore_mentions:

@@ -7,6 +7,7 @@ import subprocess
 import time
 import webbrowser
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from io import StringIO
@@ -804,6 +805,20 @@ class InputOutput:
         return False
 
     @restore_multiline
+    @contextmanager
+    def pipeline_auto_confirm(self):
+        """Answer yes to prompts raised by a sub-coder we are driving.
+
+        Pipeline mode asks the user for approval at its own checkpoints, so
+        prompts from the worker it runs internally would stall the run.
+        """
+        previous = self.yes
+        self.yes = True
+        try:
+            yield
+        finally:
+            self.yes = previous
+
     def confirm_ask(
         self,
         question,

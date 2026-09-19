@@ -33,6 +33,27 @@ usage: aider [-h] [--model] [--openai-api-key] [--anthropic-api-key]
              [--auto-accept-architect | --no-auto-accept-architect]
              [--weak-model] [--editor-model] [--editor-edit-format]
              [--show-model-warnings | --no-show-model-warnings]
+             [--pipeline] [--pipeline-architect-model]
+             [--pipeline-worker-model]
+             [--pipeline-architect-api-base]
+             [--pipeline-worker-api-base] [--pipeline-approve]
+             [--pipeline-tdd | --no-pipeline-tdd]
+             [--pipeline-prewarm | --no-pipeline-prewarm]
+             [--pipeline-stream-worker | --no-pipeline-stream-worker]
+             [--pipeline-architect-map-tokens]
+             [--pipeline-ledger-view-tokens]
+             [--pipeline-working-memory-tokens]
+             [--pipeline-facts-tokens]
+             [--pipeline-review-diff-tokens]
+             [--pipeline-lint-output-tokens]
+             [--pipeline-test-output-tokens]
+             [--pipeline-source-slice-tokens]
+             [--pipeline-worker-snippet-tokens]
+             [--pipeline-whole-file-max-tokens]
+             [--pipeline-grep-hits] [--pipeline-max-tasks]
+             [--pipeline-max-attempts] [--pipeline-max-test-rounds]
+             [--pipeline-max-need-rounds]
+             [--pipeline-max-worker-calls]
              [--check-model-accepts-settings | --no-check-model-accepts-settings]
              [--max-chat-history-tokens]
              [--cache-prompts | --no-cache-prompts]
@@ -243,6 +264,117 @@ Aliases:
 ### `--max-chat-history-tokens VALUE`
 Soft limit on tokens for chat history, after which summarization begins. If unspecified, defaults to the model's max_chat_history_tokens.  
 Environment variable: `AIDER_MAX_CHAT_HISTORY_TOKENS`  
+
+## Pipeline mode (two models):
+
+### `--pipeline`
+Use pipeline edit format: the main model plans and reviews, a smaller worker model edits one file at a time with a fresh context  
+Environment variable: `AIDER_PIPELINE`  
+
+### `--pipeline-architect-model MODEL`
+Model that plans, briefs and reviews in pipeline mode (default: --model)  
+Environment variable: `AIDER_PIPELINE_ARCHITECT_MODEL`  
+
+### `--pipeline-worker-model MODEL`
+Model that edits files in pipeline mode (default: --editor-model, then --model)  
+Environment variable: `AIDER_PIPELINE_WORKER_MODEL`  
+
+### `--pipeline-architect-api-base URL`
+API base for the architect model, e.g. http://127.0.0.1:8081/v1 for a llama-server on your first GPU  
+Environment variable: `AIDER_PIPELINE_ARCHITECT_API_BASE`  
+
+### `--pipeline-worker-api-base URL`
+API base for the worker model, e.g. http://127.0.0.1:8082/v1 for a llama-server on your second GPU  
+Environment variable: `AIDER_PIPELINE_WORKER_API_BASE`  
+
+### `--pipeline-approve VALUE`
+When to stop and ask you: plan (once, the default), task (every task), never (fully automatic)  
+Environment variable: `AIDER_PIPELINE_APPROVE`  
+
+### `--pipeline-tdd`
+Write tests before the code they cover (default: False)  
+Environment variable: `AIDER_PIPELINE_TDD`  
+Aliases:
+  - `--pipeline-tdd`
+  - `--no-pipeline-tdd`
+
+### `--pipeline-prewarm`
+Load both models at startup so the first task does not wait for a cold start (default: on only when both pipeline api_base values are local)  
+Environment variable: `AIDER_PIPELINE_PREWARM`  
+Aliases:
+  - `--pipeline-prewarm`
+  - `--no-pipeline-prewarm`
+
+### `--pipeline-stream-worker`
+Stream the worker's output as it edits (default: False)  
+Environment variable: `AIDER_PIPELINE_STREAM_WORKER`  
+Aliases:
+  - `--pipeline-stream-worker`
+  - `--no-pipeline-stream-worker`
+
+### `--pipeline-architect-map-tokens TOKENS`
+Limit on the repo map sent to the architect (default: 2000)  
+Environment variable: `AIDER_PIPELINE_ARCHITECT_MAP_TOKENS`  
+
+### `--pipeline-ledger-view-tokens TOKENS`
+Limit on the plan and task list sent to the architect (default: 1500)  
+Environment variable: `AIDER_PIPELINE_LEDGER_VIEW_TOKENS`  
+
+### `--pipeline-working-memory-tokens TOKENS`
+Limit on the facts the architect is allowed to keep between steps (default: 2000)  
+Environment variable: `AIDER_PIPELINE_WORKING_MEMORY_TOKENS`  
+
+### `--pipeline-facts-tokens TOKENS`
+Limit on the lookup results sent to the architect for one step (default: 3000)  
+Environment variable: `AIDER_PIPELINE_FACTS_TOKENS`  
+
+### `--pipeline-review-diff-tokens TOKENS`
+Limit on the diff sent to the architect for review (default: 2500)  
+Environment variable: `AIDER_PIPELINE_REVIEW_DIFF_TOKENS`  
+
+### `--pipeline-lint-output-tokens TOKENS`
+Limit on the lint output sent to the architect (default: 800)  
+Environment variable: `AIDER_PIPELINE_LINT_OUTPUT_TOKENS`  
+
+### `--pipeline-test-output-tokens TOKENS`
+Limit on the test output sent to the architect (default: 1500)  
+Environment variable: `AIDER_PIPELINE_TEST_OUTPUT_TOKENS`  
+
+### `--pipeline-source-slice-tokens TOKENS`
+Limit on the source the architect can pull for one symbol (default: 1200)  
+Environment variable: `AIDER_PIPELINE_SOURCE_SLICE_TOKENS`  
+
+### `--pipeline-worker-snippet-tokens TOKENS`
+Limit on the read-only snippets inlined into a worker brief (default: 2000)  
+Environment variable: `AIDER_PIPELINE_WORKER_SNIPPET_TOKENS`  
+
+### `--pipeline-whole-file-max-tokens TOKENS`
+Limit on the file size above which the worker switches to diffs (default: 3000)  
+Environment variable: `AIDER_PIPELINE_WHOLE_FILE_MAX_TOKENS`  
+
+### `--pipeline-grep-hits N`
+Limit on the search hits returned to the architect (default: 40)  
+Environment variable: `AIDER_PIPELINE_GREP_HITS`  
+
+### `--pipeline-max-tasks N`
+Limit on the tasks allowed in one plan (default: 25)  
+Environment variable: `AIDER_PIPELINE_MAX_TASKS`  
+
+### `--pipeline-max-attempts N`
+Limit on the worker attempts per task before it is failed (default: 2)  
+Environment variable: `AIDER_PIPELINE_MAX_ATTEMPTS`  
+
+### `--pipeline-max-test-rounds N`
+Limit on the test fix rounds per task (default: 3)  
+Environment variable: `AIDER_PIPELINE_MAX_TEST_ROUNDS`  
+
+### `--pipeline-max-need-rounds N`
+Limit on the lookup rounds the architect may take per step (default: 3)  
+Environment variable: `AIDER_PIPELINE_MAX_NEED_ROUNDS`  
+
+### `--pipeline-max-worker-calls N`
+Limit on the worker calls in one run (default: 200)  
+Environment variable: `AIDER_PIPELINE_MAX_WORKER_CALLS`  
 
 ## Cache settings:
 

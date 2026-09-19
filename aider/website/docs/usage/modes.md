@@ -1,7 +1,7 @@
 ---
 parent: Usage
 nav_order: 60
-description: Using the code, architect, ask and help chat modes.
+description: Using the code, architect, pipeline, ask and help chat modes.
 ---
 
 # Chat modes
@@ -11,11 +11,12 @@ Aider has a few different chat modes:
 - `code` - Aider will make changes to your code to satisfy your requests.
 - `ask` - Aider will discuss your code and answer questions about it, but never make changes.
 - `architect` - Like code mode, aider will change your files. An architect model will propose changes and an editor model will translate that proposal into specific file edits.
+- `pipeline` - Like architect mode, but the work is split into one task per file. The architect plans, briefs and reviews each change; a smaller worker model edits one file at a time with a fresh context. See [pipeline mode](pipeline.html).
 - `help` - Aider will answer questions about aider: usage, configuration, troubleshooting, etc.
 
 By default, aider starts in "code" mode. As you are talking, you can
 send individual messages in a specific mode using 
-`/code`, `/architect`, `/ask`, and `/help` commands:
+`/code`, `/architect`, `/pipeline`, `/ask`, and `/help` commands:
 Using these `/`-commands applies just to that particular message.
 Your next message will go back to the active mode (usually "code" mode by default).
 
@@ -25,6 +26,7 @@ with the `/chat-mode <mode>` command:
 ```
 /chat-mode code
 /chat-mode architect
+/chat-mode pipeline
 /chat-mode ask
 /chat-mode help
 ```
@@ -34,11 +36,13 @@ Or you can switch between coding modes using these commands without arguments:
 ```
 /code
 /architect
+/pipeline
 /ask
 ```
 
 Or you can launch aider in one of the modes with the `--chat-mode <mode>` switch.
-There is also a special shortcut `--architect` to launch in `--chat-mode architect`.
+There is also a special shortcut `--architect` to launch in `--chat-mode architect`,
+and `--pipeline` for pipeline mode.
 
 The aider prompt will indicate the active mode:
 
@@ -46,6 +50,7 @@ The aider prompt will indicate the active mode:
 > This is code mode.
 ask> This is ask mode.
 architect> This is architect mode.
+pipeline> This is pipeline mode.
 ```
 
 

@@ -119,6 +119,84 @@
 ## Soft limit on tokens for chat history, after which summarization begins. If unspecified, defaults to the model's max_chat_history_tokens.
 #max-chat-history-tokens: xxx
 
+#############################
+# Pipeline mode (two models):
+
+## Use pipeline edit format: the main model plans and reviews, a smaller worker model edits one file at a time with a fresh context
+#pipeline: false
+
+## Model that plans, briefs and reviews in pipeline mode (default: --model)
+#pipeline-architect-model: xxx
+
+## Model that edits files in pipeline mode (default: --editor-model, then --model)
+#pipeline-worker-model: xxx
+
+## API base for the architect model, e.g. http://127.0.0.1:8081/v1 for a llama-server on your first GPU
+#pipeline-architect-api-base: xxx
+
+## API base for the worker model, e.g. http://127.0.0.1:8082/v1 for a llama-server on your second GPU
+#pipeline-worker-api-base: xxx
+
+## When to stop and ask you: plan (once, the default), task (every task), never (fully automatic)
+#pipeline-approve: xxx
+
+## Write tests before the code they cover (default: False)
+#pipeline-tdd: xxx
+
+## Load both models at startup so the first task does not wait for a cold start (default: on only when both pipeline api_base values are local)
+#pipeline-prewarm: xxx
+
+## Stream the worker's output as it edits (default: False)
+#pipeline-stream-worker: xxx
+
+## Limit on the repo map sent to the architect (default: 2000)
+#pipeline-architect-map-tokens: xxx
+
+## Limit on the plan and task list sent to the architect (default: 1500)
+#pipeline-ledger-view-tokens: xxx
+
+## Limit on the facts the architect is allowed to keep between steps (default: 2000)
+#pipeline-working-memory-tokens: xxx
+
+## Limit on the lookup results sent to the architect for one step (default: 3000)
+#pipeline-facts-tokens: xxx
+
+## Limit on the diff sent to the architect for review (default: 2500)
+#pipeline-review-diff-tokens: xxx
+
+## Limit on the lint output sent to the architect (default: 800)
+#pipeline-lint-output-tokens: xxx
+
+## Limit on the test output sent to the architect (default: 1500)
+#pipeline-test-output-tokens: xxx
+
+## Limit on the source the architect can pull for one symbol (default: 1200)
+#pipeline-source-slice-tokens: xxx
+
+## Limit on the read-only snippets inlined into a worker brief (default: 2000)
+#pipeline-worker-snippet-tokens: xxx
+
+## Limit on the file size above which the worker switches to diffs (default: 3000)
+#pipeline-whole-file-max-tokens: xxx
+
+## Limit on the search hits returned to the architect (default: 40)
+#pipeline-grep-hits: xxx
+
+## Limit on the tasks allowed in one plan (default: 25)
+#pipeline-max-tasks: xxx
+
+## Limit on the worker attempts per task before it is failed (default: 2)
+#pipeline-max-attempts: xxx
+
+## Limit on the test fix rounds per task (default: 3)
+#pipeline-max-test-rounds: xxx
+
+## Limit on the lookup rounds the architect may take per step (default: 3)
+#pipeline-max-need-rounds: xxx
+
+## Limit on the worker calls in one run (default: 200)
+#pipeline-max-worker-calls: xxx
+
 #################
 # Cache settings:
 

@@ -275,6 +275,64 @@ def launch_gui(args):
     # sys.argv = ['streamlit', 'run', '--'] + args
 
 
+def set_api_base(model, api_base):
+    """Point one model at its own endpoint, so two GPUs need no config files."""
+    if not api_base:
+        return
+    if model.extra_params is None:
+        model.extra_params = {}
+    model.extra_params["api_base"] = api_base
+
+
+def looks_local_api_base(url):
+    if not url:
+        return False
+    host = url.lower()
+    return any(token in host for token in ("127.0.0.1", "localhost", "[::1]"))
+
+
+def setup_pipeline(args, main_model, io):
+    """Build the pipeline config and worker model. Returns (config, worker)."""
+    from aider.pipeline.config import PipelineConfig
+
+    if getattr(args, "edit_format", None) != "pipeline":
+        return None, None
+
+    config = PipelineConfig.from_args(args)
+    if args.pipeline_prewarm is None:
+        config = config.replace(
+            prewarm=looks_local_api_base(args.pipeline_architect_api_base)
+            and looks_local_api_base(args.pipeline_worker_api_base)
+        )
+    problems = config.validate()
+    if problems:
+        for problem in problems:
+            io.tool_error(problem)
+        return None, None
+
+    set_api_base(main_model, args.pipeline_architect_api_base)
+
+    worker_model = None
+    if args.pipeline_worker_model:
+        worker_model = models.Model(args.pipeline_worker_model, verbose=args.verbose)
+    elif main_model.editor_model and main_model.editor_model is not main_model:
+        worker_model = main_model.editor_model
+
+    if args.pipeline_worker_api_base:
+        if worker_model is None or worker_model is main_model:
+            io.tool_warning(
+                "--pipeline-worker-api-base needs a separate worker model. Set"
+                " --pipeline-worker-model or --editor-model too."
+            )
+        else:
+            set_api_base(worker_model, args.pipeline_worker_api_base)
+
+    if worker_model is not None and args.edit_format == "pipeline" and args.show_model_warnings:
+        models.sanity_check_model(io, worker_model)
+
+    return config, worker_model
+
+
 def parse_lint_cmds(lint_cmds, io):
     err = False
     res = dict()
@@ -819,6 +877,9 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             )
             return 1
 
+    if args.pipeline_architect_model:
+        args.model = args.pipeline_architect_model
+
     main_model = models.Model(
         args.model,
         weak_model=args.weak_model,
@@ -826,6 +887,11 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         editor_edit_format=args.editor_edit_format,
         verbose=args.verbose,
     )
+
+    pipeline_config, pipeline_worker_model = setup_pipeline(args, main_model, io)
+    if args.edit_format == "pipeline" and pipeline_config is None:
+        analytics.event("exit", reason="Invalid pipeline configuration")
+        return 1
 
     # Check if deprecated remove_reasoning is set
     if main_model.remove_reasoning is not None:
@@ -1007,6 +1073,8 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             trace=args.trace,
             auto_trace=args.auto_trace,
             trace_tokens=args.trace_tokens,
+            pipeline_config=pipeline_config,
+            pipeline_worker_model=pipeline_worker_model,
             llm_log=args.llm_log,
             llm_log_file=args.llm_log_file,
         )
