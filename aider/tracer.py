@@ -87,13 +87,89 @@ MAX_SCAN_BYTES = 1_000_000
 # big repo can't stall a turn: the most relevant files are scanned first.
 MAX_SCAN_FILES = 1200
 
+# A whole scan's worth of file text, without holding a large repo in memory
+MAX_TEXT_CACHE_BYTES = 8_000_000
+
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|spec)(/|$)|(^|/)(test_[^/]*|[^/]*_test|[^/]*\.test)\.")
 
+# Line comment markers per tree-sitter language, for the cheap "is this match
+# commented out" check. Languages not listed here use the C-style default.
+LINE_COMMENT_MARKERS = {
+    "bash": ("#",),
+    "clojure": (";",),
+    "commonlisp": (";",),
+    "css": (),
+    "dockerfile": ("#",),
+    "elisp": (";",),
+    "elixir": ("#",),
+    "elm": ("--",),
+    "erlang": ("%",),
+    "haskell": ("--",),
+    "hcl": ("#", "//"),
+    "html": (),
+    "json": (),
+    "julia": ("#",),
+    "latex": ("%",),
+    "lua": ("--",),
+    "make": ("#",),
+    "ocaml": (),
+    "perl": ("#",),
+    "python": ("#",),
+    "r": ("#",),
+    "ruby": ("#",),
+    "sql": ("--",),
+    "tcl": ("#",),
+    "toml": ("#",),
+    "yaml": ("#",),
+}
+
+DEFAULT_LINE_COMMENT_MARKERS = ("//",)
+
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*(?P<info>[^\s`~]*)\s*(?P<rest>.*?)\s*$")
-# Models often ask in prose instead of using the fence. These requests are
-# marked non-strict, so callers can require that they resolve to a real symbol.
-LOOSE_TRACE_RE = re.compile(r"\btrace\b[:\s]+(?P<body>.+?)\s*$", re.IGNORECASE)
 BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+# Models often ask in prose instead of using the fence. A request has to *lead*
+# with the ask, so that prose which merely mentions tracing ("here is the stack
+# trace Foo produced", "enable trace logging") is not mistaken for one. These
+# requests are marked non-strict, so callers can also require that they resolve
+# to a real symbol before acting on them.
+LOOSE_LEAD_WORDS = (
+    r"(?:please|can|could|would|will|shall|you|i|we|let|lets|let's|i'd|first|now|next|then"
+    r"|also|need|want|like|try|to|go|ahead|and|ok|okay|sure|maybe)"
+)
+LOOSE_TRACE_RE = re.compile(
+    rf"^\s*(?:[-*+>]\s+|\d+[.)]\s+)?(?:{LOOSE_LEAD_WORDS}\b[\s,]+)*trace\b[:\s]+(?P<body>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+# Words that follow "trace" in prose but are never the symbol being asked about
+LOOSE_STOPWORDS = {
+    "back",
+    "through",
+    "the",
+    "this",
+    "that",
+    "it",
+    "them",
+    "these",
+    "those",
+    "logging",
+    "log",
+    "logs",
+    "level",
+    "output",
+    "mode",
+    "id",
+    "again",
+    "why",
+    "how",
+    "what",
+    "where",
+    "when",
+    "which",
+    "everything",
+}
+
 DEPTH_RE = re.compile(r"^depth[=:]?(\d+)?$", re.IGNORECASE)
 
 # Characters models wrap symbols in: backticks, quotes, parens, markdown emphasis
@@ -211,10 +287,10 @@ def parse_trace_line(line, strict=True):
 def parse_trace_requests(content, max_requests=MAX_SYMBOLS_PER_REQUEST):
     """Find trace requests in an LLM reply.
 
-    Accepts the documented ```trace fenced block, and also tolerates loose
-    "trace foo" lines, which small models emit instead. Loose requests are
-    marked non-strict so the caller can require that they resolve to a real
-    symbol before acting on them.
+    Accepts the documented ```trace fenced block, and also tolerates a line
+    that leads with "trace foo", which small models emit instead. Those loose
+    requests are marked non-strict so the caller can require that they resolve
+    to a real symbol before acting on them.
     """
 
     if not content:
@@ -276,9 +352,11 @@ def parse_trace_requests(content, max_requests=MAX_SYMBOLS_PER_REQUEST):
             add(req)
             continue
 
-        loose = LOOSE_TRACE_RE.search(line)
+        loose = LOOSE_TRACE_RE.match(line)
         if loose:
-            add(parse_trace_line(loose.group("body"), strict=False))
+            req = parse_trace_line(loose.group("body"), strict=False)
+            if req and req.symbol.lower() not in LOOSE_STOPWORDS:
+                add(req)
 
     return requests[:max_requests]
 
@@ -295,6 +373,7 @@ class RepoTracer:
 
         self.parse_cache = dict()
         self.text_cache = dict()
+        self.text_cache_bytes = 0
         self.snippet_context_cache = dict()
 
         # Set per trace: don't bury real call sites under test files, unless
@@ -339,9 +418,12 @@ class RepoTracer:
 
         text = self.io.read_text(abs_fname, silent=True)
 
-        if len(self.text_cache) > 200:
+        if self.text_cache_bytes > MAX_TEXT_CACHE_BYTES:
             self.text_cache.clear()
+            self.text_cache_bytes = 0
+
         self.text_cache[key] = text
+        self.text_cache_bytes += len(text or "")
 
         return text
 
@@ -467,7 +549,7 @@ class RepoTracer:
             )
         else:
             text, shown_files = self.trace_data(
-                index, req, name, defs, chat_rel_fnames, max_tokens - footer_allowance
+                index, req, name, container, defs, chat_rel_fnames, max_tokens - footer_allowance
             )
 
         text = self.clamp(text, max_tokens - footer_allowance)
@@ -662,22 +744,31 @@ class RepoTracer:
     # Variables / attributes / fields
     ##
 
-    def trace_data(self, index, req, name, defs, chat_rel_fnames, max_tokens):
+    def trace_data(self, index, req, name, container, defs, chat_rel_fnames, max_tokens):
         """Trace a variable/attribute: where it is set, read, and where it flows.
+
+        A `container` narrows the search to uses inside a definition of that
+        name, which is how `EnclosingFunction.variable` is answered.
 
         Returns (text, files mentioned in the text), like trace_callable().
         """
 
         attribute = self.looks_like_attribute(index, req, name, defs)
 
-        scan_files = self.scan_files(index, req, name, defs)
+        scan_files = self.scan_files(index, req, name, container, defs)
         hits, total, skipped_in_chat, file_counts, truncated = self.find_occurrences(
-            index, name, scan_files, chat_rel_fnames, attribute=attribute
+            index, name, scan_files, chat_rel_fnames, attribute=attribute, container=container
         )
 
         if not hits and not total:
-            lines = [f"\nNo uses of `{req.symbol}` found in the repo."]
-            lines.append(self.suggest_similar(index, name))
+            if container:
+                lines = [
+                    f"\nNo uses of `{name}` found inside `{container}`."
+                    f" Trace `{name}` on its own to see where it is used elsewhere."
+                ]
+            else:
+                lines = [f"\nNo uses of `{req.symbol}` found in the repo."]
+                lines.append(self.suggest_similar(index, name))
             return "\n".join(line for line in lines if line), set()
 
         if len(file_counts) > MAX_FILES_BEFORE_AMBIGUOUS:
@@ -746,7 +837,7 @@ class RepoTracer:
 
         return False
 
-    def scan_files(self, index, req, name, defs):
+    def scan_files(self, index, req, name, container, defs):
         """Which files to search for a data symbol."""
 
         if req.file:
@@ -759,9 +850,26 @@ class RepoTracer:
             if matches:
                 return matches
 
+        if container:
+            # Only the files that define the container can hold uses inside it
+            holders = index.defs.get(container.rpartition(".")[2]) or []
+            matches = sorted({tag.rel_fname for tag in holders})
+            if matches:
+                return matches
+
         return list(index.abs_fnames)
 
-    def find_occurrences(self, index, name, rel_fnames, chat_rel_fnames, attribute=False):
+    def in_container(self, index, rel_fname, line, container):
+        """Is `line` inside a definition named `container`?"""
+
+        wanted = container.rpartition(".")[2].lower()
+        return any(
+            scope.name.lower() == wanted for scope in index.enclosing_scopes(rel_fname, line)
+        )
+
+    def find_occurrences(
+        self, index, name, rel_fnames, chat_rel_fnames, attribute=False, container=None
+    ):
         """Word-boundary scan, classified read/write via tree-sitter."""
 
         if attribute:
@@ -795,7 +903,10 @@ class RepoTracer:
             lines = text.splitlines()
             for lineno, line in enumerate(lines):
                 for match in pattern.finditer(line):
-                    if self.in_comment_or_string(line, match.start()):
+                    if self.in_comment(line, match.start(), lang):
+                        continue
+
+                    if container and not self.in_container(index, rel_fname, lineno, container):
                         continue
 
                     total += 1
@@ -812,11 +923,18 @@ class RepoTracer:
 
         return hits, total, skipped_in_chat, file_counts, truncated
 
-    def in_comment_or_string(self, line, col):
-        """Cheap filter for matches inside a line comment."""
+    def in_comment(self, line, col, lang):
+        """Cheap filter for matches that sit inside a line comment.
+
+        The marker has to come from the language: `//` is a comment in C but
+        floor division in python, and `#` starts a comment in python but a
+        preprocessor directive in C and an id selector in CSS.
+        """
+
+        markers = LINE_COMMENT_MARKERS.get(lang, DEFAULT_LINE_COMMENT_MARKERS)
 
         before = line[:col]
-        for marker in ("#", "//"):
+        for marker in markers:
             idx = before.find(marker)
             if idx >= 0 and before.count('"', 0, idx) % 2 == 0:
                 return True
@@ -1274,13 +1392,15 @@ class RepoTracer:
         return "\n".join(lines)
 
     def render_ambiguous_files(self, req, name, total, file_counts):
+        ordered = sorted(file_counts.items(), key=lambda item: (-item[1], item[0]))
+        example = ordered[0][0] if ordered else "path/to/file.py"
+
         lines = [
             f"\n`{req.symbol}` appears {total} times across {len(file_counts)} files, which is"
-            " too common to trace usefully. Narrow it down with"
-            f" `{name} in path/to/file.py` or `EnclosingFunction.{name}`. Most uses are in:"
+            " too common to trace usefully. Ask again for one place, either as"
+            f" `{name} in {example}` or as `EnclosingFunction.{name}`. Most uses are in:"
         ]
 
-        ordered = sorted(file_counts.items(), key=lambda item: (-item[1], item[0]))
         for rel_fname, count in ordered[:10]:
             lines.append(f"- {rel_fname} ({count} uses)")
 

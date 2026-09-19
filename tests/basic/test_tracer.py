@@ -73,6 +73,18 @@ def consume(raw_value):
     return handle_request(raw_value)
 """
 
+COUNTERS_PY = """\
+def alpha():
+    count = 1
+    return count
+
+
+def beta(total):
+    count = 2
+    ratio = total // count
+    return ratio
+"""
+
 
 class TestTraceParsing(unittest.TestCase):
     def test_clean_symbol_strips_decoration(self):
@@ -165,6 +177,28 @@ trace bar
         self.assertEqual(reqs[0].symbol, "handle_request")
         self.assertFalse(reqs[0].strict)
 
+    def test_parse_loose_requests_lead_with_the_ask(self):
+        for line, symbol in (
+            ("trace handle_request", "handle_request"),
+            ("Please trace `normalize()` for me.", "normalize"),
+            ("Can you trace save_record up?", "save_record"),
+            ("- trace handle_request", "handle_request"),
+            ("I want to trace handle_request first.", "handle_request"),
+        ):
+            reqs = parse_trace_requests(line + "\n")
+            self.assertEqual([req.symbol for req in reqs], [symbol], line)
+
+    def test_parse_ignores_prose_that_merely_mentions_tracing(self):
+        for line in (
+            "Here is the stack trace `RepoMap` produced when it failed.",
+            "The error trace: ValueError in main",
+            "Enable trace logging via the config file.",
+            "Let me trace through the logic in handle_request.",
+            "I read the traceback, and the trace shows normalize failing.",
+            "Add a trace statement to save_record.",
+        ):
+            self.assertEqual(parse_trace_requests(line + "\n"), [], line)
+
     def test_parse_caps_number_of_requests(self):
         content = "```trace\na\nb\nc\nd\ne\n```\n"
         self.assertEqual(len(parse_trace_requests(content)), 3)
@@ -190,6 +224,7 @@ class TestRepoTracer(unittest.TestCase):
             "api.py": API_PY,
             "cli.py": CLI_PY,
             "worker.py": WORKER_PY,
+            "counters.py": COUNTERS_PY,
             "unrelated.py": UNRELATED_PY,
         }
         for fname, content in self.files.items():
@@ -294,6 +329,37 @@ class TestRepoTracer(unittest.TestCase):
 
         self.assertIn("storage.py", result)
         self.assertNotIn("service.py:", result)
+
+    def test_trace_variable_can_be_narrowed_to_one_function(self):
+        result = self.trace("beta.count")
+
+        self.assertIn("counters.py", result)
+        self.assertIn("def beta", result)
+        # alpha has its own `count`, which is a different variable
+        self.assertNotIn("def alpha", result)
+
+    def test_trace_variable_narrowed_to_a_function_that_never_uses_it(self):
+        result = self.trace("alpha.ratio")
+
+        self.assertIn("inside `alpha`", result)
+        self.assertIn("on its own", result)
+
+    def test_line_comment_markers_come_from_the_language(self):
+        line = "    ratio = total // count"
+        col = line.index("count")
+
+        # `//` is floor division in python, but a comment in C
+        self.assertFalse(self.tracer.in_comment(line, col, "python"))
+        self.assertTrue(self.tracer.in_comment(line, col, "c"))
+
+        line = "#include <count>"
+        col = line.index("count")
+        self.assertTrue(self.tracer.in_comment(line, col, "python"))
+        self.assertFalse(self.tracer.in_comment(line, col, "c"))
+
+    def test_floor_division_is_not_mistaken_for_a_comment(self):
+        result = self.trace("count", file="counters.py")
+        self.assertIn("total // count", result)
 
     def test_trace_constant_read(self):
         result = self.trace("RETRY_LIMIT")
