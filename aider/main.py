@@ -299,12 +299,7 @@ def setup_pipeline(args, main_model, io):
 
     worker_model = None
     if args.pipeline_worker_model:
-        worker_model = models.Model(
-            args.pipeline_worker_model,
-            weak_model=False,
-            editor_model=False,
-            verbose=args.verbose,
-        )
+        worker_model = models.Model(args.pipeline_worker_model, verbose=args.verbose)
     elif main_model.editor_model and main_model.editor_model is not main_model:
         worker_model = main_model.editor_model
 

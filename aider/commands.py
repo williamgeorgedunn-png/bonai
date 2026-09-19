@@ -177,6 +177,13 @@ class Commands:
                     ),
                 ),
                 (
+                    "pipeline",
+                    (
+                        "Plan with an architect model, then edit one file at a time with a"
+                        " small worker model."
+                    ),
+                ),
+                (
                     "context",
                     "Automatically identify which files will need to be edited.",
                 ),

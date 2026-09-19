@@ -55,6 +55,12 @@ class WorkerPool:
             return coder
 
         from aider.coders.base_coder import Coder
+        from aider.history import ChatSummary
+
+        # The worker's history is wiped every task so it never summarizes, but
+        # give it a summarizer anyway: a worker model configured without a weak
+        # model would otherwise fail to build one.
+        summarizer = ChatSummary([self.model], self.model.max_chat_history_tokens)
 
         coder = Coder.create(
             main_model=self.model,
@@ -78,6 +84,7 @@ class WorkerPool:
             trace=False,
             auto_trace=False,
             total_cost=0.0,
+            summarizer=summarizer,
         )
         coder.max_reflections = 1
         self.coders[edit_format] = coder
