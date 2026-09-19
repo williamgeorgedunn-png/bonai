@@ -26,6 +26,11 @@ cog.out(text)
 
 ### main branch
 
+- Added pipeline mode (`--pipeline`): a planning architect and a small editing worker, each with a bounded context, aimed at two local GPUs.
+  - The architect is stateless per step (ledger + working memory + outlines). REVIEW sees a token-capped git diff; `NEED: source` can pull one symbol.
+  - The worker edits one file per task with a wiped history; the coder object is reused so the local server can keep its KV cache.
+  - One git commit per accepted task. Failed tests become a new task, never an amend.
+  - New `/pipeline` command, plus `--pipeline-architect-api-base` / `--pipeline-worker-api-base` to point each model at its own llama-server. State lives in `.aider.pipeline/` (covered by the existing `.aider*` gitignore offer).
 - Added code tracing, which finds where a symbol is defined, called, read and written and shows it as short snippets instead of whole files.
   - Aider traces symbols mentioned by you or the LLM automatically, and the results are dropped from the chat history after one message.
   - The LLM can ask for a trace itself with a fenced `trace` block, and aider replies with the results, the same way it handles a request to add files.

@@ -298,7 +298,7 @@ Aliases:
   - `--no-pipeline-tdd`
 
 ### `--pipeline-prewarm`
-Load both models at startup so the first task does not wait for a cold start (default: True)  
+Load both models at startup so the first task does not wait for a cold start (default: on only when both pipeline api_base values are local)  
 Environment variable: `AIDER_PIPELINE_PREWARM`  
 Aliases:
   - `--pipeline-prewarm`

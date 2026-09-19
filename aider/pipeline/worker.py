@@ -106,14 +106,21 @@ class WorkerPool:
             return
 
         def ping():
+            import contextlib
+            import io as stdio
+
             messages = [{"role": "user", "content": "ready?"}]
-            for model in (self.model, self.parent.main_model):
-                if model is None:
-                    continue
-                try:
-                    model.simple_send_with_retries(messages)
-                except Exception:
-                    pass  # a failed warm-up is not a failed run
+            sink = stdio.StringIO()
+            # simple_send_with_retries prints retries to stdout; keep that off
+            # the TTY while the user may be approving the plan.
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                for model in (self.model, self.parent.main_model):
+                    if model is None:
+                        continue
+                    try:
+                        model.simple_send_with_retries(messages)
+                    except Exception:
+                        pass  # a failed warm-up is not a failed run
 
         self.prewarm_thread = threading.Thread(target=ping, daemon=True)
         self.prewarm_thread.start()
@@ -138,6 +145,17 @@ class WorkerPool:
         coder.summarizer_thread = None
         coder.summarized_done_messages = []
         coder.summarizing_messages = None
+        coder.snippets = dict()
+        coder.focus_idents = set()
+        coder.trace_contents = set()
+        coder.pending_trace_contents = set()
+        coder.traced_this_turn = set()
+        coder.auto_trace_cache = None
+        coder.num_trace_rounds = 0
+        if hasattr(coder, "file_reasons"):
+            coder.file_reasons = {}
+        if hasattr(coder, "pending_file_reasons"):
+            coder.pending_file_reasons = {}
 
     def edit(self, abs_fname, brief_text, edit_format=None):
         """Apply one brief to one file with an empty worker context."""

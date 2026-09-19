@@ -197,7 +197,7 @@ cog.outl("```")
 ## Write tests before the code they cover (default: False)
 #pipeline-tdd: xxx
 
-## Load both models at startup so the first task does not wait for a cold start (default: True)
+## Load both models at startup so the first task does not wait for a cold start (default: on only when both pipeline api_base values are local)
 #pipeline-prewarm: xxx
 
 ## Stream the worker's output as it edits (default: False)

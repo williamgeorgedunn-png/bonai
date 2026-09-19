@@ -11,9 +11,12 @@ plans the work, writes one brief per file and reviews every change. A smaller
 **worker** does the editing: one file at a time, with an empty context for each
 task.
 
-It exists for one reason: **neither model needs a large context window.** The
-architect never sees file contents, and the worker never sees more than the one
-file it is changing plus a few short snippets. That makes it practical to run
+It exists for one reason: **neither model needs a large context window.**
+PLAN and BRIEF work from outlines, not source. REVIEW is sent a
+token-capped git diff of the one file that changed, and the architect can
+pull a single symbol with `NEED: source` if it must — those slices are
+discarded when the step ends. The worker never sees more than the one file
+it is changing plus a few short snippets. That makes it practical to run
 both models locally on modest GPUs — see
 [running two local models on two GPUs](../llms/dual-gpu-local.html).
 
@@ -154,7 +157,10 @@ Other options worth knowing:
 - `--pipeline-whole-file-max-tokens` sets the size above which the worker
   switches from rewriting whole files to search/replace edits. Whole-file
   rewrites are much more reliable for small models, but slow on large files.
-- `--no-pipeline-prewarm` skips loading both models at startup.
+- `--pipeline-prewarm` sends a real request to both models at startup so they
+  load into VRAM. It is **off** unless both `--pipeline-*-api-base` values
+  look local (`127.0.0.1` / `localhost`), to avoid a surprise bill on a hosted
+  API. `--no-pipeline-prewarm` skips it even for local servers.
 
 ## Tests and linting
 

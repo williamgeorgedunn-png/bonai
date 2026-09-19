@@ -17,9 +17,12 @@ TRIAGE_VERDICTS = ("FIX_CODE", "FIX_TEST", "ACCEPT_KNOWN", "ESCALATE")
 class PipelineCoder(Coder):
     """Architect plans and reviews; a small worker edits one file at a time.
 
-    The architect is never shown file contents and never accumulates chat
-    history. The worker gets an empty context for every task. State lives in
-    a ledger on disk, so a run survives a crash and can be resumed.
+    The architect is stateless: each call is rebuilt from the ledger, working
+    memory, and this step's inputs. PLAN and BRIEF use outlines, not source.
+    REVIEW is sent a token-capped git diff of the one file that changed;
+    NEED: source can pull one symbol. Nothing accumulates in chat history.
+    The worker gets an empty context for every task. State lives in a ledger
+    on disk, so a run survives a crash and can be resumed.
     """
 
     edit_format = "pipeline"
@@ -41,7 +44,7 @@ class PipelineCoder(Coder):
         )
 
         if self.repo_map:
-            # The architect gets a map instead of file contents, so size it here.
+            # PLAN/BRIEF use the map and outlines, not chat file dumps.
             self.repo_map.max_map_tokens = self.config.architect_map_tokens
             self.repo_map.map_mul_no_files = 1.0
 
@@ -63,6 +66,10 @@ class PipelineCoder(Coder):
             f" {self.config.working_memory_tokens}, facts {self.config.facts_tokens} tokens",
             f"Approvals: {self.config.approve}",
         ]
+        if self.config.prewarm:
+            lines.append(
+                "Prewarm is on: a real request will be sent to both models at startup"
+            )
         for line in lines:
             self.io.tool_output(line)
 
@@ -630,7 +637,18 @@ class PipelineCoder(Coder):
         self.io.tool_output(f"Architect triage: {verdict}")
 
         if verdict in ("ACCEPT_KNOWN",):
-            task.notes = (step.directives.notes or ["Known failure accepted."])[0][:200]
+            note = (step.directives.notes or ["Known failure accepted."])[0][:200]
+            if self.config.approve == "never":
+                # Unattended mode has no human to confirm a leftover failure.
+                self.io.tool_error(
+                    "The architect accepted a known test failure, but"
+                    " --pipeline-approve never has no one to confirm it."
+                    " Treating this as ESCALATE."
+                )
+                task.notes = note
+                self.pipeline_stop = True
+                return
+            task.notes = note
             return
         if verdict == "ESCALATE":
             self.io.tool_error("The architect escalated the test failure to you.")

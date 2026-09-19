@@ -202,7 +202,7 @@ class TestPipelineRun(PipelineTestCase):
                 [item.text for item in coder.ledger.memory.items],
             )
 
-    def test_architect_never_sees_file_contents(self):
+    def test_plan_and_brief_use_outlines_not_source(self):
         with GitTemporaryDirectory() as root:
             calc = Path(root) / "calc.py"
             calc.write_text(CALC_SOURCE)
@@ -227,6 +227,11 @@ class TestPipelineRun(PipelineTestCase):
             # It gets an outline instead of the source
             self.assertIn("Outline of calc.py", brief_prompt)
             self.assertIn("scale", brief_prompt)
+
+            # REVIEW is supposed to see the token-capped diff of this file
+            review_prompt = self.architect.prompt_text(2)
+            self.assertIn("if factor < 0", review_prompt)
+            self.assertIn("```diff", review_prompt)
 
     def test_retry_then_accept_makes_one_commit(self):
         with GitTemporaryDirectory() as root:
@@ -447,6 +452,13 @@ class TestWorkerContextWipe(PipelineTestCase):
             worker.abs_fnames = {"/tmp/stale.py"}
             worker.aider_edited_files = {"stale.py"}
             worker.num_reflections = 3
+            worker.snippets = {("stale.py", "foo"): (1, 2)}
+            worker.focus_idents = {"foo"}
+            worker.trace_contents = {"old trace"}
+            worker.pending_trace_contents = {"pending"}
+            worker.traced_this_turn = {"foo"}
+            worker.auto_trace_cache = object()
+            worker.num_trace_rounds = 2
 
             pool.reset(worker, ["/tmp/fresh.py"])
 
@@ -455,6 +467,13 @@ class TestWorkerContextWipe(PipelineTestCase):
             self.assertEqual(worker.abs_fnames, {"/tmp/fresh.py"})
             self.assertEqual(worker.aider_edited_files, set())
             self.assertEqual(worker.num_reflections, 0)
+            self.assertEqual(worker.snippets, {})
+            self.assertEqual(worker.focus_idents, set())
+            self.assertEqual(worker.trace_contents, set())
+            self.assertEqual(worker.pending_trace_contents, set())
+            self.assertEqual(worker.traced_this_turn, set())
+            self.assertIsNone(worker.auto_trace_cache)
+            self.assertEqual(worker.num_trace_rounds, 0)
 
     def test_worker_system_prompt_is_identical_between_tasks(self):
         """A stable prefix is what lets a local server reuse its KV cache."""
@@ -681,6 +700,38 @@ class TestPipelineTests(PipelineTestCase):
             self.assertTrue(coder.pipeline_stop)
             self.assertIsNone(coder.ledger.get("T3"))
 
+    def test_accept_known_escalates_when_unattended(self):
+        with GitTemporaryDirectory() as root:
+            calc = Path(root) / "calc.py"
+            calc.write_text(CALC_SOURCE)
+            repo = git.Repo(root)
+            repo.git.add("calc.py")
+            repo.git.commit("-m", "initial")
+
+            coder = self.make_coder(
+                root,
+                config=PipelineConfig(approve="never"),
+                architect_replies=[
+                    TEST_PLAN_REPLY,
+                    BRIEF_REPLY,
+                    ACCEPT_REPLY,
+                    BRIEF_REPLY.replace("calc.py", "test_calc.py"),
+                    ACCEPT_REPLY,
+                    "VERDICT: ACCEPT_KNOWN\nNOTE: pre-existing flake",
+                ],
+                worker_replies=[
+                    WORKER_EDIT.replace("    if factor < 0:\n        factor = 0\n", ""),
+                    TEST_FILE_EDIT,
+                ],
+            )
+            coder.test_cmd = FlakyTests(calc)
+            coder.repo.get_commit_message = MagicMock(return_value="c")
+            coder.run(with_message="clamp and test", preproc=False)
+
+            self.assertTrue(coder.pipeline_stop)
+            self.assertIsNone(coder.ledger.get("T3"))
+            self.assertIn("pre-existing flake", coder.ledger.get("T2").notes)
+
     def test_tdd_ordering_runs_tests_first(self):
         with GitTemporaryDirectory() as root:
             calc = Path(root) / "calc.py"
@@ -886,6 +937,47 @@ class TestPipelineSetupFromArgs(unittest.TestCase):
         self.assertIsNotNone(worker.weak_model)
         summarizer = ChatSummary([worker.weak_model, worker], worker.max_chat_history_tokens)
         self.assertTrue(callable(summarizer.token_count))
+
+    def test_pipeline_off_does_not_build_a_config(self):
+        from aider.main import setup_pipeline
+
+        args = self.parse(["--no-show-model-warnings"])
+        config, worker = setup_pipeline(args, Model("gpt-4o"), InputOutput(yes=True))
+        self.assertIsNone(config)
+        self.assertIsNone(worker)
+
+    def test_prewarm_defaults_on_only_for_local_endpoints(self):
+        from aider.main import setup_pipeline
+
+        local = self.parse(
+            [
+                "--pipeline",
+                "--pipeline-worker-model",
+                "openai/worker",
+                "--pipeline-architect-api-base",
+                "http://127.0.0.1:8081/v1",
+                "--pipeline-worker-api-base",
+                "http://localhost:8082/v1",
+                "--no-show-model-warnings",
+            ]
+        )
+        config, _worker = setup_pipeline(local, Model("openai/architect"), InputOutput(yes=True))
+        self.assertTrue(config.prewarm)
+
+        hosted = self.parse(
+            [
+                "--pipeline",
+                "--pipeline-worker-model",
+                "openai/worker",
+                "--pipeline-architect-api-base",
+                "https://api.example.com/v1",
+                "--pipeline-worker-api-base",
+                "http://127.0.0.1:8082/v1",
+                "--no-show-model-warnings",
+            ]
+        )
+        config, _worker = setup_pipeline(hosted, Model("openai/architect"), InputOutput(yes=True))
+        self.assertFalse(config.prewarm)
 
 
 class TestPipelineOffByDefault(unittest.TestCase):

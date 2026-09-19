@@ -39,7 +39,8 @@ class PipelineConfig:
     # Behaviour
     approve: str = "plan"
     tdd: bool = False
-    prewarm: bool = True
+    # Off unless both endpoints look local — a hosted API would be a surprise bill.
+    prewarm: bool = False
     stream_worker: bool = False
 
     @classmethod

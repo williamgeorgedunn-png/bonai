@@ -46,23 +46,19 @@ class KnowledgeService:
         self.digest_fn = digest_fn
         self.get_all_abs_files = get_all_abs_files or (lambda: [])
         self.cache_dir = Path(cache_dir) if cache_dir else self.root / ".aider.pipeline" / "digests"
-        self._index = None
-        self._index_key = None
         self.digest_calls = 0
         self.digest_hits = 0
 
     # --------------------------------------------------------------- index
 
     def index(self):
-        """The repo map's symbol index, rebuilt only when files change."""
+        """The repo map's symbol index, rebuilt when a file's mtime changes."""
         if not self.tracer:
             return None
-        fnames = list(self.get_all_abs_files())
-        key = len(fnames)
-        if self._index is None or self._index_key != key:
-            self._index = self.tracer.get_index(fnames)
-            self._index_key = key
-        return self._index
+        # RepoMap.get_symbol_index already keys on (fname, mtime). Calling it
+        # here means a worker edit invalidates outlines/refs/source for later
+        # tasks even when the file count is unchanged.
+        return self.tracer.get_index(list(self.get_all_abs_files()))
 
     def abs_path(self, rel_fname):
         return str(self.root / rel_fname)
@@ -192,8 +188,24 @@ class KnowledgeService:
         except re.error as err:
             return Fact(need, title, f"Invalid pattern: {err}")
 
+        fnames = list(self.get_all_abs_files())
+        truncated_files = False
+        try:
+            from aider.tracer import MAX_SCAN_FILES
+
+            limit = MAX_SCAN_FILES
+        except ImportError:
+            limit = 1200
+        if len(fnames) > limit:
+            truncated_files = True
+            if self.tracer:
+                rels = sorted((self._rel(f) for f in fnames), key=self.tracer.file_sort_key)
+                fnames = [self.abs_path(rel) for rel in rels[:limit]]
+            else:
+                fnames = sorted(fnames)[:limit]
+
         hits = []
-        for abs_fname in sorted(self.get_all_abs_files()):
+        for abs_fname in fnames:
             if len(hits) >= self.config.grep_hits:
                 break
             text = self.io.read_text(abs_fname)
@@ -213,6 +225,8 @@ class KnowledgeService:
             body = f"{note}\n{body}"
         if len(hits) >= self.config.grep_hits:
             body += f"\n(stopped at {self.config.grep_hits} matches)"
+        if truncated_files:
+            body += f"\n(searched the {limit} most relevant files)"
         return Fact(need, title, body)
 
     def _need_trace(self, need):

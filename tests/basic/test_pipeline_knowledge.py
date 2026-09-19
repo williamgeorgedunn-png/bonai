@@ -75,6 +75,36 @@ class TestLookups(KnowledgeTestCase):
             # An outline is signatures, not bodies
             self.assertNotIn("started = time.time()", fact.text)
 
+    def test_outline_updates_after_an_edit_without_adding_files(self):
+        with GitTemporaryDirectory() as root:
+            self.write_repo(root)
+            knowledge = self.build(root)
+            before = knowledge.answer(Need("outline", target="client.py"))
+            before_span = None
+            for line in before.text.splitlines():
+                if ".request" in line or line.startswith("- request"):
+                    before_span = line
+                    break
+            self.assertIsNotNone(before_span)
+
+            source = Path(root) / "client.py"
+            extra = "\n".join(f"        x{n} = {n}" for n in range(30))
+            source.write_text(CLIENT.replace("started = time.time()", extra, 1))
+            source.touch()
+
+            after = knowledge.answer(Need("outline", target="client.py"))
+            after_span = None
+            for line in after.text.splitlines():
+                if ".request" in line or line.startswith("- request"):
+                    after_span = line
+                    break
+            self.assertIsNotNone(after_span)
+            self.assertNotEqual(
+                before_span,
+                after_span,
+                "the outline should pick up the new end line after an in-place edit",
+            )
+
     def test_outline_matches_a_partial_path(self):
         with GitTemporaryDirectory() as root:
             (Path(root) / "net").mkdir()
@@ -190,8 +220,7 @@ class TestDigestCache(KnowledgeTestCase):
 
             source = Path(root) / "client.py"
             source.write_text(CLIENT.replace("started = time.time()", "started = 0.0"))
-            knowledge._index = None
-            knowledge._index_key = None
+            source.touch()
 
             knowledge.answer(send_need)
             self.assertEqual(len(calls), 2, "the untouched symbol stays cached")

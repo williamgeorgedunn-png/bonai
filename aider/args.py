@@ -120,7 +120,7 @@ def add_pipeline_args(parser):
         default=None,
         help=(
             "Load both models at startup so the first task does not wait for a cold"
-            " start (default: True)"
+            " start (default: on only when both pipeline api_base values are local)"
         ),
     )
     group.add_argument(

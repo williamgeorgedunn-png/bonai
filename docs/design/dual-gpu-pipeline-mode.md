@@ -1,7 +1,6 @@
 # Pipeline mode: architect / worker on two local GPUs
 
-Status: draft specification. Implementation is deferred until concurrent
-work on this repo is merged. Commit policy is decided: **one git commit per
+Status: implemented (opt-in `--pipeline`). Commit policy: **one git commit per
 accepted task**; do not squash at the end of a run.
 
 This document specifies a new opt-in aider mode ("pipeline mode") in which a
@@ -647,9 +646,10 @@ aider/website/docs/llms/dual-gpu-local.md  Windows dual-GPU setup guide
   loop; a bare message while in pipeline mode does the same.
 - `aider/coders/base_coder.py`: **no changes required** for Phase 1 to 3.
   `PipelineCoder` overrides `run_one`, `get_chat_files_messages` (returns
-  nothing: the architect never sees file contents), and
-  `get_announcements`. If a hook is later needed (e.g. exposing a scoped
-  auto-yes), add it as a small, additive method.
+  nothing, so files in the chat are not dumped into the architect prompt),
+  and `get_announcements`. REVIEW still sends a token-capped git diff of the
+  one changed file; `NEED: source` can pull one symbol. If a hook is later
+  needed (e.g. exposing a scoped auto-yes), add it as a small, additive method.
 - `aider/io.py`: add a context manager `io.auto_yes()` that temporarily
   sets `self.yes = True` and restores it; used around worker runs. (Tiny,
   additive.)

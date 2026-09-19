@@ -284,11 +284,26 @@ def set_api_base(model, api_base):
     model.extra_params["api_base"] = api_base
 
 
+def looks_local_api_base(url):
+    if not url:
+        return False
+    host = url.lower()
+    return any(token in host for token in ("127.0.0.1", "localhost", "[::1]"))
+
+
 def setup_pipeline(args, main_model, io):
     """Build the pipeline config and worker model. Returns (config, worker)."""
     from aider.pipeline.config import PipelineConfig
 
+    if getattr(args, "edit_format", None) != "pipeline":
+        return None, None
+
     config = PipelineConfig.from_args(args)
+    if args.pipeline_prewarm is None:
+        config = config.replace(
+            prewarm=looks_local_api_base(args.pipeline_architect_api_base)
+            and looks_local_api_base(args.pipeline_worker_api_base)
+        )
     problems = config.validate()
     if problems:
         for problem in problems:
@@ -874,7 +889,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     )
 
     pipeline_config, pipeline_worker_model = setup_pipeline(args, main_model, io)
-    if pipeline_config is None:
+    if args.edit_format == "pipeline" and pipeline_config is None:
         analytics.event("exit", reason="Invalid pipeline configuration")
         return 1
 
